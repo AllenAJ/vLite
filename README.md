@@ -1,3 +1,5 @@
+<img src="assets/icon.png" width="64" align="left">
+
 # VLite — lightweight Valorant tracker (Windows)
 
 A single ~1,700-line Python file, no dependencies. Shows what the Tracker.gg app shows at its core:
@@ -9,7 +11,7 @@ A single ~1,700-line Python file, no dependencies. Shows what the Tracker.gg app
   - **On this agent**: how they've done on the agent they're playing now, or "new pick".
   - **Played before**: whether you've met them, e.g. `With 2W 1L · Vs 0W 1L`
   - **Last met**: when and where, e.g. `3d ago · Ascent · Jett (vs)`
-  - **Party**: players with the same coloured dot queued together. Your own party comes straight from Riot. For everyone else it's inferred: two players who were on the same team in 2+ of their last 3 competitive games are marked as a premade.
+  - **Party**: players with the same coloured dot queued together. Your own party comes straight from Riot. For everyone else it's inferred: two players who were on the same team in 2+ of their last 5 competitive games are marked as a premade.
 - Agent portraits, rank badges and the map banner are downloaded once from valorant-api.com and saved to `%LOCALAPPDATA%\VLite\img`. Rank names are built in, so they show even offline.
 - **⚑ Flags**: your private notes on players ("threw", "AFK", "great duo"). Right-click anyone in the Live tab to flag them, or open **⚑ Flags** after a match to flag players from your last 3 lobbies. Flagged players show up in orange with your note when you meet them again. Only players whose names were visible can be flagged, and a flag never shows on someone who's hidden. Notes are stored only on your PC.
 - **My profile**: current rank/RR/peak, your **session** (W/L, RR, streak and KD for games less than 3 hours apart), a **rank-progress graph** of your last 20 competitive games (hover a point for details), and your last 20 matches with map, agent, result, score, K/D/A, KD, HS%, ACS and RR change. Double-click a match to see its **scoreboard**. Names show only for players VLite saw with visible names in that match.
@@ -18,7 +20,14 @@ A single ~1,700-line Python file, no dependencies. Shows what the Tracker.gg app
 
 "Played before" checks every match VLite has saved. On first launch that's your last 20 games, and it grows each time you play.
 
-## Install as an app (one time)
+## Download (easiest)
+1. Open **[Releases](https://github.com/AllenAJ/vLite/releases/latest)** and download **VLite.exe**.
+2. Put it anywhere (Desktop, `C:\Games\VLite`, …) and double-click it. There's nothing to install, and Python isn't needed.
+3. Windows SmartScreen may warn the first time because the exe isn't code-signed. Click **More info → Run anyway**.
+
+Every exe is built and self-tested on a clean Windows machine by GitHub Actions (`.github/workflows/build.yml`) from the code in this repo.
+
+## Build it yourself (optional)
 1. Install Python 3.9+ from python.org (tick **Add python.exe to PATH**).
 2. Put `vlite.py` and `build.bat` in one folder and double-click `build.bat`.
 3. You get `dist\VLite.exe`. Copy it anywhere (Desktop, Start menu), pin it to the taskbar, and you can uninstall Python if you like.

@@ -82,12 +82,18 @@ if WINDOWS:
     user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
     user32.SetForegroundWindow.argtypes = [wintypes.HWND]
     user32.LoadIconW.argtypes, user32.LoadIconW.restype = [wintypes.HINSTANCE, ctypes.c_void_p], wintypes.HICON
+    user32.LoadImageW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT, ctypes.c_int, ctypes.c_int,
+                                  wintypes.UINT]
+    user32.LoadImageW.restype = wintypes.HANDLE
     kernel32.GetModuleHandleW.argtypes, kernel32.GetModuleHandleW.restype = [wintypes.LPCWSTR], wintypes.HMODULE
     shell32.ExtractIconW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT]
     shell32.ExtractIconW.restype = wintypes.HICON
     shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
 
+VERSION = "1.0.0"
 APPDATA = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+# The app icon: next to this file when run from source, unpacked to sys._MEIPASS inside the built exe.
+ICON = os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))), "assets", "VLite.ico")
 LOCKFILE = os.path.join(APPDATA, "Riot Games", "Riot Client", "Config", "lockfile")
 SHOOTER_LOG = os.path.join(APPDATA, "VALORANT", "Saved", "Logs", "ShooterGame.log")
 CACHE_DIR = os.path.join(APPDATA, "VLite")
@@ -815,7 +821,9 @@ class Tray:
         self.hwnd = user32.CreateWindowExW(0, "VLiteTray", "VLite", 0, 0, 0, 0, 0, None, None, hinst, None)
         nid = self._nid(0x1 | 0x2 | 0x4)  # NIF_MESSAGE | NIF_ICON | NIF_TIP
         nid.uCallbackMessage = self.WM_TRAY
-        nid.hIcon = shell32.ExtractIconW(hinst, sys.executable, 0) or user32.LoadIconW(None, 32512)
+        # IMAGE_ICON, LR_LOADFROMFILE | LR_DEFAULTSIZE; fall back to the exe's icon, then the stock one
+        nid.hIcon = (user32.LoadImageW(None, ICON, 1, 0, 0, 0x10 | 0x40) if os.path.exists(ICON) else None) \
+            or shell32.ExtractIconW(hinst, sys.executable, 0) or user32.LoadIconW(None, 32512)
         nid.szTip = "VLite"
         shell32.Shell_NotifyIconW(0, ctypes.byref(nid))  # NIM_ADD
         msg = wintypes.MSG()
@@ -1000,7 +1008,9 @@ class App:
     # ---------- UI ----------
     def _build(self):
         r = self.root
-        r.title("VLite")
+        r.title(f"VLite {VERSION}")
+        if WINDOWS and os.path.exists(ICON):
+            r.iconbitmap(default=ICON)
         r.geometry("1400x720")
         r.minsize(700, 360)
         r.configure(bg=BG)
@@ -1703,8 +1713,41 @@ def main():
         except Exception:
             pass
     root = tk.Tk()
-    App(root)
+    app = App(root)
+    if "--selftest" in sys.argv:
+        root.after(5000, lambda: self_test(app))
     root.mainloop()
+
+
+def self_test(app):
+    """Used by the Windows build machine: exercise the Windows-only parts (tray, hotkey, click-through
+    overlay, dialogs) without a game running, then exit 0 if everything worked."""
+    problems = []
+    if WINDOWS and not app.tray.hwnd:
+        problems.append("tray icon window was not created")
+    checks = [
+        ("overlay", lambda: (app.overlay.show(True), app.root.update(), app.overlay.show(False))),
+        ("settings", app.open_settings),
+        ("flags", app.open_flags),
+        ("store view", lambda: app.show_store("self-test")),
+        ("rank graph", app.draw_rr),
+        ("notification", lambda: app.tray.notify("VLite self-test", "Everything loaded.")),
+        ("hotkey re-register", lambda: app.set_hotkey(app.settings["hotkey"])),
+    ]
+    for name, check in checks:
+        try:
+            check()
+            app.root.update()
+        except Exception as e:
+            problems.append(f"{name}: {e!r}")
+    report = "SELFTEST OK" if not problems else "SELFTEST FAILED\n" + "\n".join(problems)
+    report += f"\nhotkey: {app.hotkey_note}\nicon found: {os.path.exists(ICON)}"
+    print(report, flush=True)
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    with open(os.path.join(CACHE_DIR, "selftest.txt"), "w", encoding="utf-8") as f:
+        f.write(report)
+    app.quit()
+    os._exit(1 if problems else 0)
 
 
 if __name__ == "__main__":

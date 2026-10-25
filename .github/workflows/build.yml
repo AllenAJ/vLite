@@ -1,0 +1,50 @@
+name: Build VLite.exe
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write  # lets tagged builds attach VLite.exe to a GitHub Release
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Self-test from source (tray, hotkey, overlay, dialogs)
+        timeout-minutes: 3
+        run: python vlite.py --selftest
+
+      - name: Build VLite.exe
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller==6.11.1
+          python -m PyInstaller --onefile --noconsole --name VLite --icon assets/VLite.ico --add-data "assets/VLite.ico;assets" vlite.py
+
+      - name: Self-test the built exe
+        timeout-minutes: 3
+        run: |
+          $p = Start-Process dist\VLite.exe -ArgumentList "--selftest" -PassThru -Wait
+          Get-Content "$env:LOCALAPPDATA\VLite\selftest.txt"
+          if ($p.ExitCode -ne 0) { exit 1 }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VLite
+          path: dist/VLite.exe
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/VLite.exe
+          generate_release_notes: true
