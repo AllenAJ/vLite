@@ -35,6 +35,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 from collections import Counter
@@ -95,7 +96,7 @@ if WINDOWS:
     shell32.ExtractIconW.restype = wintypes.HICON
     shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 GITHUB_REPO = "AllenAJ/vLite"  # releases here are where update checks look
 APPDATA = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
 # The app icon: next to this file when run from source, unpacked to sys._MEIPASS inside the built exe.
@@ -1361,7 +1362,7 @@ class App:
         self.alert_flagged(match.get("ID"), table)
         self.remember_lobby(match.get("ID"), a.map(match.get("MapID")), [
             {"puuid": r["puuid"], "name": r["player"], "agent_id": r["agent_id"], "ally": r["ally"]}
-            for r in table if not r["hidden"] and not r["me"]])
+            for r in table if not r["hidden"] and not r["me"] and r["player"] != "?"])
 
     # ---------- flags: private notes on players whose names you could see ----------
     def remember_lobby(self, match_id, map_name, players):
@@ -1382,7 +1383,10 @@ class App:
 
     def comp_line(self, table):
         """Your team's roles (hovered picks count, so you can plan), with a warning for gaps."""
-        roles = Counter(self.assets.role(r["agent_id"]) for r in table if r["ally"] and r["agent_id"])
+        allies = [r for r in table if r["ally"] and r["agent_id"]]
+        if len(allies) < 2 and len(table) > 10:  # free-for-all (Deathmatch): there is no team comp
+            return ""
+        roles = Counter(self.assets.role(r["agent_id"]) for r in allies)
         roles.pop(None, None)
         if not roles:
             return ""
@@ -1894,7 +1898,11 @@ class App:
             try:
                 if not self.riot.puuid:
                     self.riot.connect(self.assets.version)
-                    self.me_name = self.riot.names([self.riot.puuid])[self.riot.puuid]
+                    try:
+                        self.me_name = self.riot.names([self.riot.puuid])[self.riot.puuid]
+                    except urllib.error.HTTPError as e:
+                        log.warning("own name lookup failed: HTTP %s", e.code)
+                        self.me_name = "You"
                 if self.reload_profile:
                     self.reload_profile = False
                     self.post(self.set_status, "Loading your matches…")
@@ -1926,7 +1934,7 @@ class App:
                     self.post(self.set_status, "Riot asked us to slow down — pausing 60s")
                     delay = 60
                 else:
-                    self.post(self.set_status, f"Riot servers returned {e.code}, retrying…")
+                    self.post(self.set_status, f"Riot returned {e.code} for {endpoint(e.url)}, retrying…")
                     delay = 15
             except (FileNotFoundError, ConnectionError, urllib.error.URLError):
                 self.riot.puuid = None
@@ -1991,7 +1999,11 @@ class App:
         self.kind = kind
         rows = self.riot.players(kind, match)
         visible = [p["puuid"] for p in rows if not p["hidden"]]
-        names = self.riot.names(visible)
+        try:
+            names = self.riot.names(visible)
+        except urllib.error.HTTPError as e:  # show the lobby anyway; names come back on a later poll
+            log.warning("names lookup failed: HTTP %s for %s", e.code, endpoint(e.url))
+            names = {}
         with ThreadPoolExecutor(3) as ex:  # only new players cost a request; the rest are cached
             ranks = dict(zip(visible, ex.map(self.riot.rank, visible)))
         forms = {}
@@ -2062,6 +2074,11 @@ def friend_status(presences, assets):
     size, max_size = flat.get("partySize"), flat.get("maxPartySize")
     party = f" · party {size}/{max_size}" if size and max_size and size > 1 else ""
     return 2, f"In menus{' · ' + mode if mode else ''}{party}", tier, level
+
+
+def endpoint(url):
+    """Which Riot call failed, without the host or any IDs: e.g. /name-service/v2/players."""
+    return redact(urllib.parse.urlsplit(url or "").path) or "?"
 
 
 def redact(text):
