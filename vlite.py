@@ -98,7 +98,7 @@ if WINDOWS:
     shell32.ExtractIconW.restype = wintypes.HICON
     shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
 
-VERSION = "1.2.2"
+VERSION = "1.3.0"
 GITHUB_REPO = "AllenAJ/vLite"  # releases here are where update checks look
 APPDATA = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
 # The app icon: next to this file when run from source, unpacked to sys._MEIPASS inside the built exe.
@@ -330,6 +330,24 @@ class Images:
         return self._memo[kind, key, px]
 
 
+def hover_note(widget, text):
+    """A small note that appears while the mouse is over widget (used for flag notes)."""
+    tip = {}
+
+    def show(_e):
+        tip["w"] = w = tk.Toplevel(widget)
+        w.overrideredirect(True)
+        w.geometry(f"+{widget.winfo_rootx()}+{widget.winfo_rooty() + widget.winfo_height() + 2}")
+        tk.Label(w, text=text, bg=PANEL, fg=FLAG_COLOR, padx=8, pady=4, font=("Segoe UI", 9)).pack()
+
+    def hide(_e):
+        if tip.get("w"):
+            tip.pop("w").destroy()
+
+    widget.bind("<Enter>", show, add="+")
+    widget.bind("<Leave>", hide, add="+")
+
+
 def col(title, key, icon=None, field=None):
     return title, key, icon, field
 
@@ -342,6 +360,11 @@ ALL_COLS = [
     col("Mains", "mains", "agent", "main_id"), col("On this agent", "on_agent"),
     col("Played before", "met"), col("Last met", "last_met"),
 ]
+# The lean default: who they are, how good, recent form, history with you. Everything else is "More stats".
+LIVE_SIMPLE_COLS = [col("", "party"), col("Agent", "agent", "agent", "agent_id"), col("Player", "player_f"),
+                    col("Rank", "rank", "tier", "tier"), col("KD", "kd"), col(f"Last {FORM_MATCHES}", "last"),
+                    col("Played before", "met")]
+OV_DEFAULT_COLS = ["party", "agent", "player", "rank", "kd", "last"]
 # Compact overlay: one short line per player (party dot, agent, rank badge, KD, flag mark).
 COMPACT_COLS = [col("", "party"), col("", "agent_icon", "agent", "agent_id"), col("", "rank_icon", "tier", "tier"),
                 col("KD", "kd"), col("", "flag_mark")]
@@ -379,7 +402,7 @@ class PlayerTable(tk.Frame):
             font = ("Segoe UI Semibold" if row["me"] else "Segoe UI", self.size)
             for c, (_title, key, icon, field) in enumerate(self.cols):
                 img = self.images.get(icon, row.get(field), self.icon_px) if icon else None
-                if key == "player":
+                if key in ("player", "player_f"):
                     fg = (MUTED if row["hidden"] else FLAG_COLOR if row["flag"] else OV_ALLY if row["ally"]
                           else FG if row.get("ffa") else OV_ENEMY)
                 else:
@@ -389,6 +412,8 @@ class PlayerTable(tk.Frame):
                 cell.grid(row=r, column=c, sticky="nsew")
                 if self.on_menu:
                     cell.bind("<Button-3>", lambda e, row=row: self.on_menu(row, e))
+                if key == "player_f" and row["flag"]:
+                    hover_note(cell, row["flag"])
             r += 1
 
 
@@ -780,12 +805,15 @@ def load_settings():
                 "ov_cols": ["party", "agent", "player", "rank", "kd", "acs", "last", "met"],
                 "auto_show_pregame": True, "auto_hide_ingame": False, "popup_flagged": True, "notify": True,
                 "tray": True, "startup": False, "ov_session": True, "check_updates": True, "recap": True,
-                "ov_compact": False, "weekly_report": True}
+                "ov_compact": False, "weekly_report": True, "live_details": False}
     try:
         with open(SETTINGS_FILE) as f:
             settings.update(json.load(f))
     except (OSError, ValueError):
         pass
+    if not settings.get("ui_v2"):  # 1.3.0's simpler UI: start everyone from the lean overlay columns once
+        settings["ov_cols"], settings["ui_v2"] = list(OV_DEFAULT_COLS), True
+        settings["flag_col"] = settings["mains_col"] = True
     for new_col in ("flag", "mains"):  # columns added in later versions: switch each on once
         if not settings.get(new_col + "_col"):
             settings["ov_cols"] = settings["ov_cols"] + [new_col]
@@ -997,7 +1025,8 @@ class Overlay:
         self.head.config(font=("Segoe UI Semibold", font + 1))
         if self.table:
             self.table.destroy()
-        cols = COMPACT_COLS if self.settings["ov_compact"] else [c for c in ALL_COLS if c[1] in self.settings["ov_cols"]]
+        cols = COMPACT_COLS if self.settings["ov_compact"] else [
+            col("Player", "player_f") if c[1] == "player" else c for c in ALL_COLS if c[1] in self.settings["ov_cols"]]
         self.table = PlayerTable(self.win, cols, self.images, OV_BG, icon_px=icon, size=font)
         self.table.pack(padx=6, pady=(0, 8))
         if self._last:
@@ -1108,7 +1137,7 @@ class App:
         r.title(f"VLite {VERSION}")
         if WINDOWS and os.path.exists(ICON):
             r.iconbitmap(default=ICON)
-        r.geometry("1400x720")
+        r.geometry("1120x700")
         r.minsize(700, 360)
         r.configure(bg=BG)
         s = ttk.Style(r)
@@ -1133,81 +1162,89 @@ class App:
         s.configure("TEntry", fieldbackground=PANEL, foreground=FG, insertcolor=FG)
 
         top = ttk.Frame(r)
-        top.pack(fill="x", padx=10, pady=8)
+        top.pack(fill="x", padx=12, pady=(10, 4))
         self.status = ttk.Label(top, text="Starting…", style="Muted.TLabel")
         self.status.pack(side="left")
-        ttk.Button(top, text="Refresh", command=self.refresh).pack(side="right")
-        ttk.Button(top, text="Show / hide overlay", command=lambda: self.toggle_overlay()).pack(side="right", padx=6)
-        ttk.Button(top, text="Settings", command=self.open_settings).pack(side="right")
-        ttk.Button(top, text="⚑ Flags", command=self.open_flags).pack(side="right", padx=6)
+        menu = tk.Menu(r, tearoff=0, bg=PANEL, fg=FG, activebackground=GRID, activeforeground=FG, bd=0)
+        for label, cmd in (("⚑  Flags", self.open_flags), ("Weekly report", lambda: self.request_weekly("manual")),
+                           ("Settings", self.open_settings), (None, None), ("Refresh", self.refresh),
+                           ("Copy diagnostics", self.copy_diagnostics), ("Check for updates", self.check_updates_now)):
+            if label:
+                menu.add_command(label=label, command=cmd)
+            else:
+                menu.add_separator()
+        more = ttk.Button(top, text="☰", width=3)
+        more.config(command=lambda: menu.tk_popup(more.winfo_rootx(), more.winfo_rooty() + more.winfo_height()))
+        more.pack(side="right")
+        self.ov_btn = ttk.Button(top, text="Overlay", command=self.toggle_overlay)
+        self.ov_btn.pack(side="right", padx=6)
 
         self.tabs = ttk.Notebook(r)
         self.tabs.pack(fill="both", expand=True)
-        live, prof, stats, friends, xhair, store = (ttk.Frame(self.tabs) for _ in range(6))
-        self.tabs.add(live, text="Live match")
-        self.tabs.add(prof, text="My profile")
-        self.tabs.add(stats, text="Stats")
-        self.tabs.add(friends, text="Friends")
-        self.tabs.add(xhair, text="Crosshairs")
-        self.tabs.add(store, text="Store")
+        live, me, self.friends_tab, xhair, store = (ttk.Frame(self.tabs) for _ in range(5))
+        friends = self.friends_tab
+        for frame, title in ((live, "Live"), (me, "Me"), (friends, "Friends"), (xhair, "Crosshairs"), (store, "Store")):
+            self.tabs.add(frame, text=title)
         self.tabs.bind("<<NotebookTabChanged>>", self.tab_changed)
         self.banner = tk.Frame(r, bg="#2a3a1f", padx=12, pady=6)  # "update available", packed when needed
         self.mode_warn = tk.Label(r, bg="#3a2a14", fg=FG, padx=12, pady=6, anchor="w", font=("Segoe UI", 10),
-                                  text="⚠ VALORANT's Display Mode is Fullscreen, so the overlay can't appear over the game. "
-                                       "In VALORANT: Settings → Video → General → Display Mode → Windowed Fullscreen.")
+                                  text="⚠ The overlay can't show over Fullscreen. In VALORANT set "
+                                       "Video → Display Mode → Windowed Fullscreen.")
 
-        self.live_head = ttk.Label(live, style="Head.TLabel", compound="left")
-        self.live_head.pack(anchor="w", padx=10, pady=(8, 0))
+        head = ttk.Frame(live)
+        head.pack(fill="x", padx=10, pady=(10, 0))
+        self.live_head = ttk.Label(head, style="Head.TLabel", compound="left")
+        self.live_head.pack(side="left")
+        self.details = tk.BooleanVar(value=self.settings["live_details"])
+        ttk.Checkbutton(head, text="More stats", variable=self.details, command=self.toggle_details).pack(side="right")
         self.live_sub = ttk.Label(live, style="Muted.TLabel")
-        self.live_sub.pack(anchor="w", padx=12, pady=(2, 8))
-        self.live_table = PlayerTable(live, ALL_COLS, self.images, BG, icon_px=28, size=10,
+        self.live_sub.pack(anchor="w", padx=12, pady=(4, 8))
+        self.live_table = PlayerTable(live, self.live_cols(), self.images, BG, icon_px=28, size=10,
             row_bg=lambda row: PANEL if row.get("ffa") and not row["me"] else ALLY_BG if row["ally"] else ENEMY_BG,
             on_menu=self.row_menu)
-        self.live_table.pack(anchor="nw", padx=10, pady=(0, 4))
-        ttk.Label(live, text="Right-click a player to flag them with a note. Past lobbies are under ⚑ Flags.",
-                  style="Muted.TLabel").pack(anchor="w", padx=12, pady=(0, 8))
+        self.live_table.pack(anchor="nw", padx=10, pady=(0, 8))
 
-        self.prof_head = ttk.Label(prof, style="Head.TLabel", compound="left")
-        self.prof_head.pack(anchor="w", padx=10, pady=(8, 2))
-        self.session_lbl = ttk.Label(prof, style="Muted.TLabel")
+        self.prof_head = ttk.Label(me, style="Head.TLabel", compound="left")
+        self.prof_head.pack(anchor="w", padx=10, pady=(10, 2))
+        self.session_lbl = ttk.Label(me, style="Muted.TLabel")
         self.session_lbl.pack(anchor="w", padx=12)
-        self.goal_lbl = ttk.Label(prof, style="Muted.TLabel")
-        self.goal_lbl.pack(anchor="w", padx=12, pady=(0, 2))
-        ttk.Button(prof, text="Weekly report", command=lambda: self.request_weekly("manual")) \
-            .pack(anchor="w", padx=12, pady=(2, 6))
-        ttk.Label(prof, text="Rank progress (last 20 competitive games)", style="Muted.TLabel").pack(anchor="w", padx=12)
-        self.rr_canvas = tk.Canvas(prof, height=150, bg=BG, highlightthickness=0)
-        self.rr_canvas.pack(fill="x", padx=10, pady=(0, 8))
+        self.goal_lbl = ttk.Label(me, style="Muted.TLabel")
+        self.goal_lbl.pack(anchor="w", padx=12, pady=(0, 6))
+        self.rr_canvas = tk.Canvas(me, height=130, bg=BG, highlightthickness=0)
+        self.rr_canvas.pack(fill="x", padx=10, pady=(0, 6))
         self.rr_canvas.bind("<Configure>", lambda _e: self.draw_rr())
         self.rr_canvas.bind("<Motion>", self.rr_hover)
         self.rr_canvas.bind("<Leave>", lambda _e: self.rr_canvas.delete("tip"))
-        self.hist = make_tree(prof, [("Date", 110), ("Mode", 80), ("Map", 80), ("Result", 60),
-                                     ("Score", 60), ("K / D / A", 90), ("KD", 50), ("HS%", 50), ("ACS", 50),
-                                     ("RR", 50)], icon_col=("Agent", 130))
+        views = ttk.Notebook(me)
+        views.pack(fill="both", expand=True, padx=6)
+        matches, stats = ttk.Frame(views), ttk.Frame(views)
+        views.add(matches, text="Matches")
+        views.add(stats, text="Maps & agents")
+        self.hist = make_tree(matches, [("Date", 110), ("Mode", 80), ("Map", 80), ("Result", 60),
+                                        ("Score", 60), ("K / D / A", 90), ("KD", 50), ("HS%", 50), ("ACS", 50),
+                                        ("RR", 50)], icon_col=("Agent", 130))
         self.hist.tag_configure("Win", foreground=WIN)
         self.hist.tag_configure("Loss", foreground=LOSS)
         self.hist.bind("<Double-1>", lambda e: self.open_scoreboard(self.hist.identify_row(e.y)))
-        ttk.Label(prof, text="Double-click a match to see its scoreboard.", style="Muted.TLabel") \
-            .pack(anchor="w", padx=12, pady=(0, 8))
+        ttk.Label(matches, text="Double-click a match for its scoreboard", style="Muted.TLabel") \
+            .pack(anchor="w", padx=12, pady=(0, 6))
 
         bar = ttk.Frame(stats)
         bar.pack(fill="x", padx=10, pady=8)
-        self.stats_head = ttk.Label(bar, style="Head.TLabel")
+        self.stats_head = ttk.Label(bar, style="Muted.TLabel")
         self.stats_head.pack(side="left")
-        ttk.Button(bar, text="Load 20 older matches", command=self.load_more).pack(side="right")
+        ttk.Button(bar, text="Load older matches", command=self.load_more).pack(side="right")
         panes = ttk.Frame(stats)
         panes.pack(fill="both", expand=True)
         stat_cols = [("Games", 70), ("Win %", 70), ("KD", 60), ("ACS", 60), ("HS%", 60)]
         left, right = ttk.Frame(panes), ttk.Frame(panes)
         left.pack(side="left", fill="both", expand=True)
         right.pack(side="left", fill="both", expand=True)
-        ttk.Label(left, text="By map", style="Muted.TLabel").pack(anchor="w", padx=12)
         self.map_stats = make_tree(left, stat_cols, icon_col=("Map", 150))
-        ttk.Label(right, text="By agent", style="Muted.TLabel").pack(anchor="w", padx=12)
         self.agent_stats = make_tree(right, stat_cols, icon_col=("Agent", 150))
 
         bar = ttk.Frame(store)
-        bar.pack(fill="x", padx=10, pady=8)
+        bar.pack(fill="x", padx=10, pady=10)
         ttk.Button(bar, text="Load my store", command=self.load_store).pack(side="left")
         self.wallet_lbl = ttk.Label(bar, style="Muted.TLabel")
         self.wallet_lbl.pack(side="left", padx=14)
@@ -1215,13 +1252,11 @@ class App:
         self.store_body.pack(fill="both", expand=True, padx=10)
 
         self.friends_head = ttk.Label(friends, style="Head.TLabel", text="Friends")
-        self.friends_head.pack(anchor="w", padx=10, pady=8)
+        self.friends_head.pack(anchor="w", padx=10, pady=(10, 8))
         self.friends_tree = make_tree(friends, [("Status", 420), ("Rank", 140), ("Level", 70)], icon_col=("Friend", 260))
-        ttk.Label(friends, text="Read from the Riot Client on this PC, like the in-game friends list. Updates every 15 s.",
-                  style="Muted.TLabel").pack(anchor="w", padx=12, pady=(0, 8))
 
         form = ttk.Frame(xhair)
-        form.pack(fill="x", padx=10, pady=8)
+        form.pack(fill="x", padx=10, pady=10)
         ttk.Label(form, text="Name", style="Muted.TLabel").pack(side="left")
         self.xh_name = ttk.Entry(form, width=22)
         self.xh_name.pack(side="left", padx=(6, 14))
@@ -1233,11 +1268,20 @@ class App:
         self.xh_tree.bind("<Double-1>", lambda e: self.copy_crosshair(self.xh_tree.identify_row(e.y)))
         bar = ttk.Frame(xhair)
         bar.pack(fill="x", padx=10, pady=(0, 8))
-        ttk.Button(bar, text="Copy code", command=lambda: self.copy_crosshair(self.xh_tree.focus())).pack(side="left")
+        ttk.Button(bar, text="Copy", command=lambda: self.copy_crosshair(self.xh_tree.focus())).pack(side="left")
         ttk.Button(bar, text="Delete", command=self.delete_crosshair).pack(side="left", padx=6)
-        ttk.Label(bar, text="Double-click to copy. In VALORANT: Settings → Crosshair → Import Profile Code, then paste.",
+        ttk.Label(bar, text="Double-click to copy · paste in VALORANT → Crosshair → Import",
                   style="Muted.TLabel").pack(side="left", padx=10)
         self.show_crosshairs()
+
+    def live_cols(self):
+        return ALL_COLS if self.details.get() else LIVE_SIMPLE_COLS
+
+    def toggle_details(self):
+        self.set_option("live_details", self.details.get())
+        self.live_table.cols, self.live_table._rows = self.live_cols(), None
+        if self._live_args:
+            self.show_live(*self._live_args)
 
     def set_hotkey(self, combo=None):
         combo = combo or self.settings["hotkey"]
@@ -1245,6 +1289,7 @@ class App:
             self.settings["hotkey"] = combo
             save_settings(self.settings)
             self.hotkey_note = f"Overlay: {combo}"
+            self.ov_btn.config(text=f"Overlay  ({combo})")
         else:
             self.hotkey_note = f"⚠ {combo} is used by another app, pick another overlay hotkey"
         self.set_status(self.hotkey_note)
@@ -1259,32 +1304,45 @@ class App:
             self.dlg.lift()
             return
         d = self.dlg = tk.Toplevel(self.root)
-        d.title("Overlay settings")
+        d.title("Settings")
         d.configure(bg=BG)
         d.resizable(False, False)
         d.transient(self.root)
-        f = ttk.Frame(d, padding=16)
-        f.pack(fill="both")
+        pages = ttk.Notebook(d)
+        pages.pack(fill="both", padx=10, pady=10)
+        ov, beh, app = (ttk.Frame(pages, padding=14) for _ in range(3))
+        for frame, title in ((ov, "Overlay"), (beh, "Behaviour"), (app, "App")):
+            pages.add(frame, text=title)
 
-        def row(r, label, widget):
-            ttk.Label(f, text=label, style="Muted.TLabel").grid(row=r, column=0, sticky="nw", pady=5, padx=(0, 14))
+        def row(page, r, label, widget):
+            ttk.Label(page, text=label, style="Muted.TLabel").grid(row=r, column=0, sticky="nw", pady=5, padx=(0, 14))
             widget.grid(row=r, column=1, sticky="w", pady=5)
 
-        def combo(values, current, on_pick):
-            box = ttk.Combobox(f, values=values, width=16, state="readonly")
+        def combo(page, values, current, on_pick):
+            box = ttk.Combobox(page, values=values, width=16, state="readonly")
             box.set(current)
             box.bind("<<ComboboxSelected>>", lambda _e: on_pick(box.get()))
             return box
 
-        row(0, "Show / hide hotkey", combo(HOTKEYS, self.settings["hotkey"], self.set_hotkey))
-        row(1, "Position", combo(CORNERS, self.settings["corner"], lambda v: self.update_overlay(corner=v)))
-        row(2, "Size", combo(list(OV_SIZES), self.settings["ov_size"], lambda v: self.update_overlay(ov_size=v)))
-        opacity = tk.Scale(f, from_=40, to=97, orient="horizontal", length=200, bg=BG, fg=FG, troughcolor=PANEL,
+        def toggles(page, items):
+            frame = ttk.Frame(page)
+            for i, (key, text) in enumerate(items):
+                var = tk.BooleanVar(value=self.settings[key])
+                ttk.Checkbutton(frame, text=text, variable=var, command=lambda k=key, v=var: self.set_option(k, v.get())) \
+                    .grid(row=i, column=0, sticky="w", pady=2)
+            return frame
+
+        row(ov, 0, "Hotkey", combo(ov, HOTKEYS, self.settings["hotkey"], self.set_hotkey))
+        row(ov, 1, "Position", combo(ov, CORNERS, self.settings["corner"], lambda v: self.update_overlay(corner=v)))
+        row(ov, 2, "Size", combo(ov, list(OV_SIZES), self.settings["ov_size"], lambda v: self.update_overlay(ov_size=v)))
+        opacity = tk.Scale(ov, from_=40, to=97, orient="horizontal", length=200, bg=BG, fg=FG, troughcolor=PANEL,
                            highlightthickness=0, bd=0, activebackground=MUTED)
         opacity.set(self.settings["ov_opacity"])
         opacity.config(command=lambda v: self.update_overlay(ov_opacity=int(float(v))))
-        row(3, "Opacity %", opacity)
-        box = ttk.Frame(f)
+        row(ov, 3, "Opacity", opacity)
+        row(ov, 4, "Style", toggles(ov, [("ov_compact", "Compact (icons + KD only)"),
+                                         ("ov_session", "Session score in the title")]))
+        box = ttk.Frame(ov)
         col_vars = {}
 
         def pick_cols():
@@ -1294,33 +1352,25 @@ class App:
             col_vars[key] = tk.BooleanVar(value=key in self.settings["ov_cols"])
             ttk.Checkbutton(box, text=title, variable=col_vars[key], command=pick_cols) \
                 .grid(row=i // 3, column=i % 3, sticky="w", padx=(0, 14), pady=1)
-        row(4, "Columns", box)
-        auto = ttk.Frame(f)
-        for i, (key, text) in enumerate([
-                ("ov_session", "Show session stats in the overlay title"),
-                ("auto_show_pregame", "Show the overlay automatically in agent select"),
-                ("auto_hide_ingame", "Hide it automatically when the match starts"),
-                ("popup_flagged", "Show the overlay when a flagged player is in your lobby"),
-                ("notify", "Windows notifications (match found, flagged player in lobby)"),
-                ("tray", "Closing the window keeps VLite running in the tray"),
-                ("startup", "Start VLite with Windows"),
-                ("recap", "Show a recap after each match"),
-                ("check_updates", "Check for VLite updates when it starts"),
-                ("weekly_report", "Show a weekly report on the first launch of each week"),
-                ("ov_compact", "Compact overlay: agent, rank badge and KD only")]):
-            var = tk.BooleanVar(value=self.settings[key])
-            ttk.Checkbutton(auto, text=text, variable=var,
-                            command=lambda k=key, v=var: self.set_option(k, v.get())).grid(row=i, column=0, sticky="w", pady=1)
-        row(5, "Automation", auto)
-        help_row = ttk.Frame(f)
+        row(ov, 5, "Columns", box)
+
+        row(beh, 0, "Overlay", toggles(beh, [("auto_show_pregame", "Show in agent select"),
+                                             ("auto_hide_ingame", "Hide when the match starts"),
+                                             ("popup_flagged", "Show when a flagged player is in the lobby")]))
+        row(beh, 1, "After games", toggles(beh, [("recap", "Match recap"), ("weekly_report", "Weekly report")]))
+        row(beh, 2, "Alerts", toggles(beh, [("notify", "Windows notifications")]))
+
+        row(app, 0, "Window", toggles(app, [("tray", "Keep running in the tray when closed"),
+                                            ("startup", "Start with Windows")]))
+        row(app, 1, "Updates", toggles(app, [("check_updates", "Check for updates on start")]))
+        help_row = ttk.Frame(app)
         ttk.Button(help_row, text="Copy diagnostics", command=self.copy_diagnostics).pack(side="left")
-        ttk.Button(help_row, text="Check for updates", command=self.check_updates_now).pack(side="left", padx=6)
-        ttk.Button(help_row, text="Open data folder", command=lambda: webbrowser.open(CACHE_DIR)).pack(side="left")
-        ttk.Label(help_row, text=f"VLite {VERSION}", style="Muted.TLabel").pack(side="left", padx=10)
-        row(7, "Help", help_row)
-        ttk.Label(f, text="Changes apply instantly. The overlay stays shown while you adjust it.",
-                  style="Muted.TLabel").grid(row=8, column=0, columnspan=2, sticky="w", pady=(12, 0))
-        self.overlay.show(True)
+        ttk.Button(help_row, text="Check now", command=self.check_updates_now).pack(side="left", padx=6)
+        ttk.Button(help_row, text="Data folder", command=lambda: webbrowser.open(CACHE_DIR)).pack(side="left")
+        row(app, 2, "Help", help_row)
+        ttk.Label(app, text=f"VLite {VERSION}", style="Muted.TLabel").grid(row=3, column=0, columnspan=2,
+                                                                          sticky="w", pady=(10, 0))
+        self.overlay.show(True)  # so overlay changes are visible while adjusting them
 
     def set_option(self, key, value):
         if key == "startup" and WINDOWS:
@@ -1398,16 +1448,17 @@ class App:
 
     def show_live(self, kind, match, rows, names, ranks, forms, enc, parties=()):
         self._live_args = (kind, match, rows, names, ranks, forms, enc, parties)
-        hide = f'{self.settings["hotkey"]} to hide'
         if not kind:
-            self.live_head.config(text="Not in a match — players show up here in agent select and in game.", image="")
-            self.live_sub.config(text="")
+            self.live_head.config(text="Waiting for a match", image="")
+            self.live_sub.config(text="Players show up here in agent select. Right-click anyone to flag them.")
             self.live_table.render([])
-            self.overlay.render(f"Not in a match · {hide}", [])
+            self.overlay.render("Waiting for a match", [])
             return
         a = self.assets
         queue_id = (match.get("MatchmakingData") or {}).get("QueueID") or match.get("QueueID") or ""
-        head = f'{STATE_LABEL[kind]} · {a.map(match.get("MapID"))} · {QUEUE_NAMES.get(queue_id, queue_id.title())}'
+        head = f'{a.map(match.get("MapID"))} · {QUEUE_NAMES.get(queue_id, queue_id.title())}'
+        if kind == "pregame":
+            head += " · agent select"
         banner = self.images.get("map", match.get("MapID"), 180)
         self.live_head.config(text=("   " if banner else "") + head, image=banner or "")
         my_team = next((p["team"] for p in rows if p["me"]), None)
@@ -1415,7 +1466,7 @@ class App:
         table = []
         ffa = queue_id == "deathmatch" or (len(rows) > 10 and sum(p["team"] == my_team for p in rows) == 1)
         if ffa:  # free-for-all: no teams, so list everyone by rank (highest first)
-            head += " · free-for-all, sorted by rank"
+            head += " · free-for-all"
             order = sorted(rows, key=lambda p: -((ranks.get(p["puuid"]) or {}).get("tier") or 0))
         else:
             order = sorted(rows, key=lambda p: (p["team"] != my_team, not p["me"]))
@@ -1423,7 +1474,7 @@ class App:
         for p in order:
             rk = ranks.get(p["puuid"]) or {}
             known, f = forms.get(p["puuid"], (True, None))
-            form = ((f'{f["kd"]:.2f}', f["acs"], "—" if f["hs"] is None else f'{f["hs"]}%', f["recent"]) if f
+            form = ((f'{f["kd"]:.2f}', f["acs"], "—" if f["hs"] is None else f'{f["hs"]}%', f["recent"].replace(" ", "")) if f
                     else ("—",) * 4 if known else ("…",) * 4)
             games = f["games"] if f else []
             mains = Counter(g[0] for g in games).most_common(2)
@@ -1438,30 +1489,32 @@ class App:
                 "flag": f'⚑ {flag["note"]}' if flag else "", "flag_color": FLAG_COLOR,
                 "agent_id": p["agent"], "agent": "Picking…" if not p["agent"] else a.agent(p["agent"]) + ("" if p["locked"] else " (hovering)"),
                 "player": "Hidden (incognito)" if p["hidden"] else names.get(p["puuid"], "?"),
+                "player_f": ("⚑ " if flag else "") + ("Hidden" if p["hidden"] else names.get(p["puuid"], "?")),
                 "lvl": p["level"] if p["level"] is not None else "—",
                 "tier": tier, "rank": (a.rank(tier) + (f' · {rk["rr"]}' if tier else "")) if rk else "—",
                 "rank_color": a.rank_color(tier),
                 "peak_tier": peak, "peak": a.rank(peak) if rk else "—", "peak_color": a.rank_color(peak),
                 "wr": f'{round(100 * rk["wins"] / rk["games"])}% ({rk["games"]})' if rk.get("games") else "—",
                 "kd": form[0], "acs": form[1], "hs": form[2], "last": form[3],
-                "met": " · ".join(f"{k.title()} {record(e[k])}" for k in ("with", "vs") if e and sum(e[k])) or "—",
+                "met": " · ".join(f"{k} {e[k][0]}–{e[k][1]}" for k in ("with", "vs") if e and sum(e[k])) or "—",
                 "last_met": (f'{ago(e["last"][0])} · {a.map(e["last"][1])} · {a.agent(e["last"][2])} ({e["last"][3]})'
                              if e and e.get("last") else "—"),
                 "party": "●" if p["puuid"] in party_of else "", "party_color": party_of.get(p["puuid"]),
                 "main_id": mains[0][0] if mains else None,
                 "mains": " · ".join(f"{a.agent(ag)} {n}" for ag, n in mains) or form[0],
-                "on_agent": (f'{len(on)}/{len(games)} games · {sum(g[1] for g in on) / max(sum(g[2] for g in on), 1):.2f} KD'
-                             f' · {sum(g[3] == "W" for g in on)}W' if on else "new pick" if games else form[0]),
+                "on_agent": (f'{sum(g[1] for g in on) / max(sum(g[2] for g in on), 1):.2f} KD in {len(on)}'
+                             if on else "new pick" if games else form[0]),
             })
+            table[-1].update({k: "" for k, v in table[-1].items() if v == "—"})  # blank, not a wall of dashes
         for i, row in enumerate(table):
             row["gap_before"] = bool(i and not ffa and table[i - 1]["ally"] and not row["ally"])
         self.live_table.render(table)
         session = f" · {self.session_short}" if self.settings["ov_session"] and self.session_short else ""
         tip = self.pick_tip(table, match.get("MapID")) if kind == "pregame" and not ffa else ""
-        sub = "   ".join(x for x in (self.comp_line(table), self.map_form(match.get("MapID"))) if x)
-        sub = "\n".join(x for x in (sub, tip) if x)
-        self.live_sub.config(text=sub)
-        self.overlay.render(f"{head}{session} · {hide}" + (f"\n{sub}" if sub else ""), table)
+        comp = "" if tip else self.comp_line(table)  # the tip already says which role is missing
+        self.live_sub.config(text="     ".join(x for x in (comp, self.map_form(match.get("MapID")), tip) if x))
+        alert = "   ".join(x for x in (comp if "⚠" in comp else "", tip) if x)  # overlay: only what needs action
+        self.overlay.render(f"{head}{session}" + (f"\n{alert}" if alert else ""), table)
         self.alert_flagged(match.get("ID"), table)
         self.remember_lobby(match.get("ID"), a.map(match.get("MapID")), [
             {"puuid": r["puuid"], "name": r["player"], "agent_id": r["agent_id"], "ally": r["ally"]}
@@ -1485,7 +1538,7 @@ class App:
             self.fill_flags()
 
     def comp_line(self, table):
-        """Your team's roles (hovered picks count, so you can plan), with a warning for gaps."""
+        """Short warning when your team's roles have a gap (role counts too with More stats)."""
         allies = [r for r in table if r["ally"] and r["agent_id"]]
         if len(allies) < 2 and len(table) > 10:  # free-for-all (Deathmatch): there is no team comp
             return ""
@@ -1494,13 +1547,13 @@ class App:
         if not roles:
             return ""
         picked = sum(roles.values())
-        text = "Your comp: " + " · ".join(f"{roles[r]} {r}" for r in ROLES if roles[r])
         warn = ["no controller"] if not roles["Controller"] and picked >= 3 else []
         if picked >= 5:
             warn += [f"no {r.lower()}" for r in ("Initiator", "Sentinel") if not roles[r]]
         if roles["Duelist"] >= 3:
             warn.append(f'{roles["Duelist"]} duelists')
-        return text + ("   ⚠ " + ", ".join(warn) if warn else "")
+        counts = " ".join(f"{roles[r]} {r[:4]}" for r in ROLES if roles[r]) if self.details.get() else ""
+        return " ".join(x for x in (counts, "⚠ " + ", ".join(warn).capitalize() if warn else "") if x)
 
     def pick_tip(self, table, map_id):
         """Agent select: which role your team still needs, and your best agent for it on this map."""
@@ -1519,11 +1572,13 @@ class App:
                 st[0], st[1] = st[0] + 1, st[1] + win
         pool = [(ag, st) for ag, st in stats.items()
                 if ag not in taken and (not need or self.assets.role(ag) == need) and (st[0] >= 2 or st[2] >= 3)]
-        text = f"Tip: your team still needs a {need}" if need else "Tip: every role is covered"
+        if not need:
+            return ""
+        text = f"Needs a {need}"
         if pool:
             ag, (mg, mw, g, w) = max(pool, key=lambda x: (x[1][1] / x[1][0] if x[1][0] >= 2 else x[1][3] / x[1][2], x[1][2]))
-            detail = f"{round(100 * mw / mg)}% WR on this map ({mg} games)" if mg >= 2 else f"{round(100 * w / g)}% WR overall ({g} games)"
-            text += f" · your best {'pick' if need else 'agent'}: {self.assets.agent(ag)}, {detail}"
+            detail = f"{round(100 * mw / mg)}% here" if mg >= 2 else f"{round(100 * w / g)}% overall"
+            text += f" → try {self.assets.agent(ag)} ({detail})"
         return text
 
     def map_form(self, map_id):
@@ -1536,8 +1591,7 @@ class App:
             if games:
                 wins = sum(outcome(m, me) == "Win" for m in games)
                 kd = sum(m["players"][me]["k"] for m in games) / max(sum(m["players"][me]["d"] for m in games), 1)
-                text = (f"You on {self.assets.map(map_id)}: {round(100 * wins / len(games))}% WR · {kd:.2f} KD "
-                        f"({len(games)} game{'s' if len(games) > 1 else ''})")
+                text = f"You here: {round(100 * wins / len(games))}% WR · {kd:.2f} KD ({len(games)})"
             self._map_form = (key, text)
         return self._map_form[1]
 
@@ -1647,8 +1701,9 @@ class App:
             wr = f' · Act: {rk["wins"]}W / {rk["games"]}G' if rk["games"] else ""
             badge = self.images.get("tier", rk["tier"], 44)
             self.prof_head.config(image=badge or "", text=f'{"  " if badge else ""}{self.me_name} · {a.rank(rk["tier"])}'
-                                                          f'{" " + str(rk["rr"]) + " RR" if rk["tier"] else ""}'
-                                                          f' · Peak {a.rank(rk["peak"])}{wr}')
+                                                          f'{" · " + str(rk["rr"]) + " RR" if rk["tier"] else ""}')
+            self.peak_text = f'Peak {a.rank(rk["peak"])}' + (f' · act {rk["wins"]}W {rk["games"] - rk["wins"]}L'
+                                                              if rk["games"] else "")
         self.check_recap(hist)
         self.show_session(hist)
         if rk:
@@ -1740,15 +1795,15 @@ class App:
             last = m["start"]
         if not games:
             self.session_short = ""
-            self.session_lbl.config(text="Session: no games in the last 3 hours")
+            self.session_lbl.config(text=getattr(self, "peak_text", ""))
             return
         wins, losses = sum(g[0] == "Win" for g in games), sum(g[0] == "Loss" for g in games)
         rr = sum(g[1] for g in games if g[1] is not None)
         streak = next((i for i, g in enumerate(games) if g[0] != games[0][0]), len(games))
         kd = sum(g[2]["k"] for g in games) / max(sum(g[2]["d"] for g in games), 1)
-        self.session_short = f"Session {wins}W {losses}L {rr:+d} RR"
-        self.session_lbl.config(text=f"Session: {wins}W {losses}L · {rr:+d} RR · "
-                                     f"{games[0][0][0]}{streak} streak · KD {kd:.2f} · {len(games)} games")
+        self.session_short = f"{wins}W {losses}L {rr:+d} RR"
+        self.session_lbl.config(text=f"Today {wins}W {losses}L · {rr:+d} RR · {games[0][0][0]}{streak} streak · "
+                                     f"KD {kd:.2f}     {getattr(self, 'peak_text', '')}")
 
     def show_goal(self, rk):
         """How far you are from the next rank, in wins and in games at your current win rate."""
@@ -1756,20 +1811,20 @@ class App:
         moves = [u.get("RankedRatingEarned", 0) for u in self.riot.rr_history if u.get("TierAfterUpdate")]
         gains, losses = [m for m in moves if m > 0], [-m for m in moves if m < 0]
         if not tier:
-            text = "Rank goal: finish your placement games to get a rank"
+            text = "Finish your placements to get a rank"
         elif tier >= 24:
-            text = (f"{self.assets.rank(tier)} · {rr} RR: from Immortal up, rank is decided by RR on the leaderboard")
+            text = "Leaderboard ranks: climb by RR"
         else:
             need = 100 - rr
-            text = f"Rank goal: {need} RR to {self.assets.rank(tier + 1)}"
+            text = f"{need} RR to {self.assets.rank(tier + 1)}"
             if gains:
                 gain = sum(gains) / len(gains)
-                text += f" · {math.ceil(need / gain)} wins at your average +{gain:.0f}"
+                text += f" · ~{math.ceil(need / gain)} wins"
                 if losses:
                     wr = len(gains) / len(moves)
                     net = wr * gain - (1 - wr) * sum(losses) / len(losses)
-                    text += (f" · about {math.ceil(need / net)} games at your current {round(100 * wr)}% win rate"
-                             if net > 0 else f" · at your current {round(100 * wr)}% win rate you're losing RR on average")
+                    text += (f" · ~{math.ceil(need / net)} games at your {round(100 * wr)}% win rate"
+                             if net > 0 else f" · losing RR on average lately")
         self.goal_lbl.config(text=text)
 
     def request_weekly(self, how):
@@ -1892,7 +1947,7 @@ class App:
         """Your competitive win rate / KD / ACS / HS% per map and per agent from every saved match."""
         me, a = self.riot.puuid, self.assets
         matches = self.riot.my_matches()
-        self.stats_head.config(text=f"Competitive · {len(matches)} of your matches saved on this PC")
+        self.stats_head.config(text=f"Competitive · {len(matches)} matches")
         for tree, key, name, icon_kind in ((self.map_stats, "map", a.map, None),
                                            (self.agent_stats, "agent", a.agent, "agent")):
             groups = {}
@@ -1981,7 +2036,7 @@ class App:
 
     # ---------- friends ----------
     def tab_changed(self, _event=None):
-        self.friends_visible = self.tabs.index("current") == 3
+        self.friends_visible = self.tabs.select() == str(self.friends_tab)
         if self.friends_visible:
             self.friends_at = 0
             self.wake.set()
@@ -1996,7 +2051,7 @@ class App:
             rows.append((order, name.lower(), name, status, tier, level))
         rows.sort()
         online = [r for r in rows if r[0] < 9]
-        self.friends_head.config(text=f"Friends · {len(online)} online · {len(rows) - len(online)} offline")
+        self.friends_head.config(text=f"Friends · {len(online)} online")
         offline = None
         for order, _key, name, status, tier, level in rows:
             parent = ""
@@ -2164,8 +2219,8 @@ class App:
                     except Exception:
                         log.warning("friends list unavailable", exc_info=True)
                 self.poll_match()
-                self.post(self.set_status, f"● {self.me_name} · {self.riot.region.upper()} · "
-                                           f"{STATE_LABEL[self.kind]}  |  {self.hotkey_note}")
+                self.post(self.set_status, f"● {self.me_name} · {STATE_LABEL[self.kind]}"
+                                           + (f"     {self.hotkey_note}" if "⚠" in self.hotkey_note else ""))
             except urllib.error.HTTPError as e:
                 log.warning("HTTP %s from %s %s", e.code, e.url, getattr(e, "riot_body", ""))
                 if e.code == 429:
