@@ -22,6 +22,7 @@ Why it shouldn't get you banned:
 Requires only Python 3.9+ from python.org (standard library, nothing to pip install).
 """
 import base64
+import glob
 import json
 import logging
 import logging.handlers
@@ -97,7 +98,7 @@ if WINDOWS:
     shell32.ExtractIconW.restype = wintypes.HICON
     shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 GITHUB_REPO = "AllenAJ/vLite"  # releases here are where update checks look
 APPDATA = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
 # The app icon: next to this file when run from source, unpacked to sys._MEIPASS inside the built exe.
@@ -852,6 +853,7 @@ class Hotkey:
         msg = wintypes.MSG()
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
             if msg.message == 0x0312:  # WM_HOTKEY
+                log.info("overlay hotkey pressed")
                 self.callback()
         user32.UnregisterHotKey(None, 1)
 
@@ -977,6 +979,13 @@ class Overlay:
             # layered | click-through | no taskbar button | never activated
             user32.SetWindowLongW(self.hwnd, -20, ex | 0x80000 | 0x20 | 0x80 | 0x08000000)
         self.show(False)
+        self.keep_on_top()
+
+    def keep_on_top(self):
+        """Games can raise their own window above everything; put the overlay back on top every second."""
+        if WINDOWS and self.visible:  # HWND_TOPMOST, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
+            user32.SetWindowPos(self.hwnd, wintypes.HWND(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
+        self.win.after(1000, self.keep_on_top)
 
     def apply(self, rebuild=True):
         """Pick up size / opacity / column changes from settings."""
@@ -1000,6 +1009,8 @@ class Overlay:
         self.show(not self.visible)
 
     def show(self, on):
+        if on != self.visible:
+            log.info("overlay %s", "shown" if on else "hidden")
         self.visible = on
         if WINDOWS:
             user32.ShowWindow(self.hwnd, 4 if on else 0)  # SW_SHOWNOACTIVATE / SW_HIDE
@@ -1081,11 +1092,12 @@ class App:
         self.recap_tries, self.last_top = 0, None  # post-match recap: retries left, newest match seen
         self._map_form = (None, None)
         self.want_weekly = False  # "manual" from the button, "auto" once per week
-        self.tray = Tray(lambda: self.post(self.open_window), lambda: self.post(self.overlay.toggle),
+        self.tray = Tray(lambda: self.post(self.open_window), lambda: self.post(self.toggle_overlay),
                          lambda: self.post(self.quit))
         root.protocol("WM_DELETE_WINDOW", self.on_close)
-        self.hotkey = Hotkey(lambda: self.post(self.overlay.toggle))
+        self.hotkey = Hotkey(lambda: self.post(self.toggle_overlay))
         self.set_hotkey()
+        self.check_display_mode()
         self.show_live(None, None, [], {}, {}, {}, {})
         threading.Thread(target=self.worker, daemon=True).start()
         root.after(200, self.drain)
@@ -1125,7 +1137,7 @@ class App:
         self.status = ttk.Label(top, text="Starting…", style="Muted.TLabel")
         self.status.pack(side="left")
         ttk.Button(top, text="Refresh", command=self.refresh).pack(side="right")
-        ttk.Button(top, text="Show / hide overlay", command=lambda: self.overlay.toggle()).pack(side="right", padx=6)
+        ttk.Button(top, text="Show / hide overlay", command=lambda: self.toggle_overlay()).pack(side="right", padx=6)
         ttk.Button(top, text="Settings", command=self.open_settings).pack(side="right")
         ttk.Button(top, text="⚑ Flags", command=self.open_flags).pack(side="right", padx=6)
 
@@ -1140,6 +1152,9 @@ class App:
         self.tabs.add(store, text="Store")
         self.tabs.bind("<<NotebookTabChanged>>", self.tab_changed)
         self.banner = tk.Frame(r, bg="#2a3a1f", padx=12, pady=6)  # "update available", packed when needed
+        self.mode_warn = tk.Label(r, bg="#3a2a14", fg=FG, padx=12, pady=6, anchor="w", font=("Segoe UI", 10),
+                                  text="⚠ VALORANT's Display Mode is Fullscreen, so the overlay can't appear over the game. "
+                                       "In VALORANT: Settings → Video → General → Display Mode → Windowed Fullscreen.")
 
         self.live_head = ttk.Label(live, style="Head.TLabel", compound="left")
         self.live_head.pack(anchor="w", padx=10, pady=(8, 0))
@@ -1345,7 +1360,22 @@ class App:
         self.hotkey.stop()
         self.root.destroy()
 
+    def check_display_mode(self):
+        """The overlay can't appear over exclusive Fullscreen; say so instead of failing silently."""
+        if valorant_display_mode() != "Fullscreen":
+            self.mode_warn.pack_forget()
+            return False
+        self.mode_warn.pack(fill="x", before=self.tabs)
+        return True
+
+    def toggle_overlay(self):
+        self.overlay.toggle()
+        if self.overlay.visible and self.check_display_mode():
+            self.notify("Overlay can't show over Fullscreen",
+                        "Set VALORANT → Settings → Video → Display Mode to Windowed Fullscreen.")
+
     def on_match_found(self, kind, map_name):
+        self.check_display_mode()
         self.notify("Match found", f"{map_name} · {STATE_LABEL[kind]}")
         if kind == "pregame" and self.settings["auto_show_pregame"]:
             self.overlay.show(True)
@@ -1939,6 +1969,8 @@ class App:
             f"VLite {VERSION} ({'exe' if getattr(sys, 'frozen', False) else 'source'})",
             platform.platform(), f"Python {platform.python_version()}",
             f"Status: {self.status.cget('text')}", f"Region: {self.riot.region or '?'} · state: {self.kind}",
+            f"VALORANT display mode: {valorant_display_mode() or 'not found'} · overlay visible: {self.overlay.visible}"
+            f" · {self.hotkey_note}",
             f"Game version sent: {getattr(self.riot, 'version', '') or '(unknown)'} · "
             f"game data: {'online' if self.assets.version else 'not loaded'}",
             f"Settings: {json.dumps(self.settings)}", "--- log ---", *tail])
@@ -2251,6 +2283,21 @@ VP_ID, RAD_ID, KC_ID = ("85ad13f7-3d1b-5128-9eb2-7cd8ee0b5741", "e59aa87c-4cbf-5
 
 def parse_version(text):
     return tuple(int(x) for x in re.findall(r"\d+", text)[:3])
+
+
+def valorant_display_mode():
+    """VALORANT's Display Mode from its settings file (newest account folder), or None if not found."""
+    base = os.path.join(APPDATA, "VALORANT", "Saved", "Config")
+    files = [f for f in glob.glob(os.path.join(base, "*", "Windows", "GameUserSettings.ini"))
+             + [os.path.join(base, "Windows", "GameUserSettings.ini")] if os.path.exists(f)]
+    if not files:
+        return None
+    try:
+        with open(max(files, key=os.path.getmtime), encoding="utf-8", errors="ignore") as f:
+            m = re.search(r"^FullscreenMode=(\d)", f.read(), re.M)
+    except OSError:
+        return None
+    return {"0": "Fullscreen", "1": "Windowed Fullscreen", "2": "Windowed"}.get(m.group(1)) if m else None
 
 
 def latest_release():

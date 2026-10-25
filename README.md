@@ -45,7 +45,8 @@ Windows SmartScreen may warn the first time because the exe isn't code-signed. C
 If you'd rather skip building, double-click `VLite.bat` to run it straight from Python.
 
 ## In-game overlay
-- Set VALORANT to **Windowed Fullscreen** (Settings → Video → Display Mode). Exclusive fullscreen draws over every other window.
+- Set VALORANT to **Windowed Fullscreen** (Settings → Video → General → Display Mode). In **Fullscreen** mode the game takes over the screen and Windows can't show any window over it, Discord and OBS included. VLite reads VALORANT's settings and shows a warning bar if it's set to Fullscreen.
+- Overlay still not showing? Click **Show / hide overlay** in VLite's window on the desktop first. If it appears there but not in game, the display mode is the cause. If it doesn't appear at all, send **Settings → Help → Copy diagnostics**: it lists the display mode, the overlay state and your hotkey presses.
 - Press **F6** in game to show or hide the overlay.
 - **Compact overlay** (Settings): one short line per player with party dot, agent, rank badge, KD and flag mark.
 - **Settings** (button in the main window) lets you change the hotkey, corner, size (Small/Normal/Large), opacity, and which columns the overlay shows. Changes apply instantly and are remembered.
