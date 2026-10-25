@@ -25,6 +25,7 @@ import base64
 import json
 import logging
 import logging.handlers
+import math
 import os
 import platform
 import queue
@@ -96,7 +97,7 @@ if WINDOWS:
     shell32.ExtractIconW.restype = wintypes.HICON
     shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
 
-VERSION = "1.1.1"
+VERSION = "1.2.0"
 GITHUB_REPO = "AllenAJ/vLite"  # releases here are where update checks look
 APPDATA = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
 # The app icon: next to this file when run from source, unpacked to sys._MEIPASS inside the built exe.
@@ -321,6 +322,9 @@ ALL_COLS = [
     col("Mains", "mains", "agent", "main_id"), col("On this agent", "on_agent"),
     col("Played before", "met"), col("Last met", "last_met"),
 ]
+# Compact overlay: one short line per player (party dot, agent, rank badge, KD, flag mark).
+COMPACT_COLS = [col("", "party"), col("", "agent_icon", "agent", "agent_id"), col("", "rank_icon", "tier", "tier"),
+                col("KD", "kd"), col("", "flag_mark")]
 OV_SIZES = {"Small": (8, 18), "Normal": (9, 22), "Large": (11, 28)}  # font size, icon px
 PARTY_COLORS = ["#f5c542", "#5ec8f2", "#c58af9", "#ff8f5a", "#7ee08a"]
 
@@ -348,7 +352,7 @@ class PlayerTable(tk.Frame):
                      padx=6).grid(row=0, column=c, sticky="w")
         r = 1
         for i, row in enumerate(rows):
-            if i and not row["ally"] and rows[i - 1]["ally"]:  # gap between your team and the enemies
+            if row.get("gap_before"):  # gap between your team and the enemies
                 tk.Frame(self, bg=self.bg, height=6).grid(row=r, column=0)
                 r += 1
             bg = self.row_bg(row) if self.row_bg else self.bg
@@ -356,7 +360,8 @@ class PlayerTable(tk.Frame):
             for c, (_title, key, icon, field) in enumerate(self.cols):
                 img = self.images.get(icon, row.get(field), self.icon_px) if icon else None
                 if key == "player":
-                    fg = MUTED if row["hidden"] else FLAG_COLOR if row["flag"] else OV_ALLY if row["ally"] else OV_ENEMY
+                    fg = (MUTED if row["hidden"] else FLAG_COLOR if row["flag"] else OV_ALLY if row["ally"]
+                          else FG if row.get("ffa") else OV_ENEMY)
                 else:
                     fg = row.get(key + "_color") or FG
                 cell = tk.Label(self, text=(" " if img else "") + str(row[key]), image=img or "", compound="left",
@@ -530,6 +535,17 @@ class Riot:
                 out.append((h["MatchID"], self.match(h["MatchID"]), rr.get(h["MatchID"])))
             except Exception:
                 continue
+        return out
+
+    def rr_updates(self, since_ms):
+        """Your competitive RR changes back to since_ms (newest first), paging 20 at a time."""
+        out = []
+        for start in range(0, 100, 20):
+            page = self.api("GET", f"{self.pd}/mmr/v1/players/{self.puuid}/competitiveupdates"
+                                   f"?startIndex={start}&endIndex={start + 20}&queue=competitive")["Matches"]
+            out += page
+            if len(page) < 20 or page[-1].get("MatchStartTime", 0) < since_ms:
+                break
         return out
 
     def my_matches(self, queue_id="competitive"):
@@ -731,7 +747,8 @@ def load_settings():
     settings = {"hotkey": "F6", "corner": "Top right", "ov_size": "Normal", "ov_opacity": 88,
                 "ov_cols": ["party", "agent", "player", "rank", "kd", "acs", "last", "met"],
                 "auto_show_pregame": True, "auto_hide_ingame": False, "popup_flagged": True, "notify": True,
-                "tray": True, "startup": False, "ov_session": True, "check_updates": True, "recap": True}
+                "tray": True, "startup": False, "ov_session": True, "check_updates": True, "recap": True,
+                "ov_compact": False, "weekly_report": True}
     try:
         with open(SETTINGS_FILE) as f:
             settings.update(json.load(f))
@@ -940,7 +957,7 @@ class Overlay:
         self.head.config(font=("Segoe UI Semibold", font + 1))
         if self.table:
             self.table.destroy()
-        cols = [c for c in ALL_COLS if c[1] in self.settings["ov_cols"]]
+        cols = COMPACT_COLS if self.settings["ov_compact"] else [c for c in ALL_COLS if c[1] in self.settings["ov_cols"]]
         self.table = PlayerTable(self.win, cols, self.images, OV_BG, icon_px=icon, size=font)
         self.table.pack(padx=6, pady=(0, 8))
         if self._last:
@@ -974,6 +991,8 @@ class Overlay:
             w.lift()
 
     def render(self, header, rows):
+        if self.settings["ov_compact"]:
+            header = header.split("\n")[0]
         if (header, rows) == self._last:
             return
         self._last = (header, rows)
@@ -1030,6 +1049,7 @@ class App:
         self.friends_visible, self.friends_at = False, 0
         self.recap_tries, self.last_top = 0, None  # post-match recap: retries left, newest match seen
         self._map_form = (None, None)
+        self.want_weekly = False  # "manual" from the button, "auto" once per week
         self.tray = Tray(lambda: self.post(self.open_window), lambda: self.post(self.overlay.toggle),
                          lambda: self.post(self.quit))
         root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -1095,7 +1115,8 @@ class App:
         self.live_sub = ttk.Label(live, style="Muted.TLabel")
         self.live_sub.pack(anchor="w", padx=12, pady=(2, 8))
         self.live_table = PlayerTable(live, ALL_COLS, self.images, BG, icon_px=28, size=10,
-            row_bg=lambda row: ALLY_BG if row["ally"] else ENEMY_BG, on_menu=self.row_menu)
+            row_bg=lambda row: PANEL if row.get("ffa") and not row["me"] else ALLY_BG if row["ally"] else ENEMY_BG,
+            on_menu=self.row_menu)
         self.live_table.pack(anchor="nw", padx=10, pady=(0, 4))
         ttk.Label(live, text="Right-click a player to flag them with a note. Past lobbies are under ⚑ Flags.",
                   style="Muted.TLabel").pack(anchor="w", padx=12, pady=(0, 8))
@@ -1103,7 +1124,11 @@ class App:
         self.prof_head = ttk.Label(prof, style="Head.TLabel", compound="left")
         self.prof_head.pack(anchor="w", padx=10, pady=(8, 2))
         self.session_lbl = ttk.Label(prof, style="Muted.TLabel")
-        self.session_lbl.pack(anchor="w", padx=12, pady=(0, 6))
+        self.session_lbl.pack(anchor="w", padx=12)
+        self.goal_lbl = ttk.Label(prof, style="Muted.TLabel")
+        self.goal_lbl.pack(anchor="w", padx=12, pady=(0, 2))
+        ttk.Button(prof, text="Weekly report", command=lambda: self.request_weekly("manual")) \
+            .pack(anchor="w", padx=12, pady=(2, 6))
         ttk.Label(prof, text="Rank progress (last 20 competitive games)", style="Muted.TLabel").pack(anchor="w", padx=12)
         self.rr_canvas = tk.Canvas(prof, height=150, bg=BG, highlightthickness=0)
         self.rr_canvas.pack(fill="x", padx=10, pady=(0, 8))
@@ -1234,7 +1259,9 @@ class App:
                 ("tray", "Closing the window keeps VLite running in the tray"),
                 ("startup", "Start VLite with Windows"),
                 ("recap", "Show a recap after each match"),
-                ("check_updates", "Check for VLite updates when it starts")]):
+                ("check_updates", "Check for VLite updates when it starts"),
+                ("weekly_report", "Show a weekly report on the first launch of each week"),
+                ("ov_compact", "Compact overlay: agent, rank badge and KD only")]):
             var = tk.BooleanVar(value=self.settings[key])
             ttk.Checkbutton(auto, text=text, variable=var,
                             command=lambda k=key, v=var: self.set_option(k, v.get())).grid(row=i, column=0, sticky="w", pady=1)
@@ -1260,6 +1287,8 @@ class App:
         save_settings(self.settings)
         if key == "ov_session" and self._live_args:
             self.show_live(*self._live_args)
+        if key == "ov_compact":
+            self.overlay.apply()
 
     # ---------- window, tray, notifications ----------
     def notify(self, title, text):
@@ -1323,7 +1352,14 @@ class App:
         my_team = next((p["team"] for p in rows if p["me"]), None)
         party_of = {pid: PARTY_COLORS[i % len(PARTY_COLORS)] for i, group in enumerate(parties) for pid in group}
         table = []
-        for p in sorted(rows, key=lambda p: (p["team"] != my_team, not p["me"])):
+        ffa = queue_id == "deathmatch" or (len(rows) > 10 and sum(p["team"] == my_team for p in rows) == 1)
+        if ffa:  # free-for-all: no teams, so list everyone by rank (highest first)
+            head += " · free-for-all, sorted by rank"
+            order = sorted(rows, key=lambda p: -((ranks.get(p["puuid"]) or {}).get("tier") or 0))
+        else:
+            order = sorted(rows, key=lambda p: (p["team"] != my_team, not p["me"]))
+        self.live_head.config(text=("   " if banner else "") + head)
+        for p in order:
             rk = ranks.get(p["puuid"]) or {}
             known, f = forms.get(p["puuid"], (True, None))
             form = ((f'{f["kd"]:.2f}', f["acs"], "—" if f["hs"] is None else f'{f["hs"]}%', f["recent"]) if f
@@ -1336,8 +1372,10 @@ class App:
             tier, peak = rk.get("tier"), rk.get("peak")
             table.append({
                 "puuid": p["puuid"], "ally": p["team"] == my_team, "me": p["me"], "hidden": p["hidden"],
+                "ffa": ffa, "locked": p["locked"], "agent_icon": "", "rank_icon": "",
+                "flag_mark": "⚑" if flag else "", "flag_mark_color": FLAG_COLOR,
                 "flag": f'⚑ {flag["note"]}' if flag else "", "flag_color": FLAG_COLOR,
-                "agent_id": p["agent"], "agent": a.agent(p["agent"]) + ("" if p["locked"] else " (hovering)"),
+                "agent_id": p["agent"], "agent": "Picking…" if not p["agent"] else a.agent(p["agent"]) + ("" if p["locked"] else " (hovering)"),
                 "player": "Hidden (incognito)" if p["hidden"] else names.get(p["puuid"], "?"),
                 "lvl": p["level"] if p["level"] is not None else "—",
                 "tier": tier, "rank": (a.rank(tier) + (f' · {rk["rr"]}' if tier else "")) if rk else "—",
@@ -1354,9 +1392,13 @@ class App:
                 "on_agent": (f'{len(on)}/{len(games)} games · {sum(g[1] for g in on) / max(sum(g[2] for g in on), 1):.2f} KD'
                              f' · {sum(g[3] == "W" for g in on)}W' if on else "new pick" if games else form[0]),
             })
+        for i, row in enumerate(table):
+            row["gap_before"] = bool(i and not ffa and table[i - 1]["ally"] and not row["ally"])
         self.live_table.render(table)
         session = f" · {self.session_short}" if self.settings["ov_session"] and self.session_short else ""
+        tip = self.pick_tip(table, match.get("MapID")) if kind == "pregame" and not ffa else ""
         sub = "   ".join(x for x in (self.comp_line(table), self.map_form(match.get("MapID"))) if x)
+        sub = "\n".join(x for x in (sub, tip) if x)
         self.live_sub.config(text=sub)
         self.overlay.render(f"{head}{session} · {hide}" + (f"\n{sub}" if sub else ""), table)
         self.alert_flagged(match.get("ID"), table)
@@ -1398,6 +1440,30 @@ class App:
         if roles["Duelist"] >= 3:
             warn.append(f'{roles["Duelist"]} duelists')
         return text + ("   ⚠ " + ", ".join(warn) if warn else "")
+
+    def pick_tip(self, table, map_id):
+        """Agent select: which role your team still needs, and your best agent for it on this map."""
+        me = self.riot.puuid
+        others = [r for r in table if r["ally"] and not r["me"] and r["agent_id"]]
+        have = Counter(self.assets.role(r["agent_id"]) for r in others)
+        need = next((role for role in ("Controller", "Initiator", "Sentinel", "Duelist") if not have[role]), None)
+        taken = {r["agent_id"] for r in others if r["locked"]}
+        stats = {}  # agent -> [games on this map, wins on this map, games, wins]
+        for _mid, m in self.riot.my_matches():
+            p = m["players"][me]
+            st = stats.setdefault(p["agent"], [0, 0, 0, 0])
+            win = outcome(m, me) == "Win"
+            st[2], st[3] = st[2] + 1, st[3] + win
+            if m["map"] == map_id:
+                st[0], st[1] = st[0] + 1, st[1] + win
+        pool = [(ag, st) for ag, st in stats.items()
+                if ag not in taken and (not need or self.assets.role(ag) == need) and (st[0] >= 2 or st[2] >= 3)]
+        text = f"Tip: your team still needs a {need}" if need else "Tip: every role is covered"
+        if pool:
+            ag, (mg, mw, g, w) = max(pool, key=lambda x: (x[1][1] / x[1][0] if x[1][0] >= 2 else x[1][3] / x[1][2], x[1][2]))
+            detail = f"{round(100 * mw / mg)}% WR on this map ({mg} games)" if mg >= 2 else f"{round(100 * w / g)}% WR overall ({g} games)"
+            text += f" · your best {'pick' if need else 'agent'}: {self.assets.agent(ag)}, {detail}"
+        return text
 
     def map_form(self, map_id):
         """Your competitive record on this map, e.g. 'You on Ascent: 64% WR · 1.21 KD (11 games)'."""
@@ -1524,6 +1590,8 @@ class App:
                                                           f' · Peak {a.rank(rk["peak"])}{wr}')
         self.check_recap(hist)
         self.show_session(hist)
+        if rk:
+            self.show_goal(rk)
         self.draw_rr()
         self.hist.delete(*self.hist.get_children())
         me = self.riot.puuid
@@ -1620,6 +1688,99 @@ class App:
         self.session_short = f"Session {wins}W {losses}L {rr:+d} RR"
         self.session_lbl.config(text=f"Session: {wins}W {losses}L · {rr:+d} RR · "
                                      f"{games[0][0][0]}{streak} streak · KD {kd:.2f} · {len(games)} games")
+
+    def show_goal(self, rk):
+        """How far you are from the next rank, in wins and in games at your current win rate."""
+        tier, rr = rk["tier"], rk["rr"]
+        moves = [u.get("RankedRatingEarned", 0) for u in self.riot.rr_history if u.get("TierAfterUpdate")]
+        gains, losses = [m for m in moves if m > 0], [-m for m in moves if m < 0]
+        if not tier:
+            text = "Rank goal: finish your placement games to get a rank"
+        elif tier >= 24:
+            text = (f"{self.assets.rank(tier)} · {rr} RR: from Immortal up, rank is decided by RR on the leaderboard")
+        else:
+            need = 100 - rr
+            text = f"Rank goal: {need} RR to {self.assets.rank(tier + 1)}"
+            if gains:
+                gain = sum(gains) / len(gains)
+                text += f" · {math.ceil(need / gain)} wins at your average +{gain:.0f}"
+                if losses:
+                    wr = len(gains) / len(moves)
+                    net = wr * gain - (1 - wr) * sum(losses) / len(losses)
+                    text += (f" · about {math.ceil(need / net)} games at your current {round(100 * wr)}% win rate"
+                             if net > 0 else f" · at your current {round(100 * wr)}% win rate you're losing RR on average")
+        self.goal_lbl.config(text=text)
+
+    def request_weekly(self, how):
+        self.want_weekly = how
+        if how == "manual":
+            self.set_status("Building your weekly report…")
+        self.wake.set()
+
+    def show_weekly(self, updates, auto):
+        """Last 7 days vs the 7 before: games, win rate, RR, KD, ACS, best map and agent."""
+        me, a = self.riot.puuid, self.assets
+        now = time.time() * 1000
+        week = 7 * 86400 * 1000
+        mine = [m for _mid, m in list(self.riot._matches.items()) if me in m["players"]]
+
+        def summary(lo, hi):
+            games = [m for m in mine if lo <= m["start"] < hi]
+            comp = [m for m in games if m["queue"] == "competitive"]
+            wins = sum(outcome(m, me) == "Win" for m in comp)
+            ps = [m["players"][me] for m in games]
+            rr = sum(u.get("RankedRatingEarned", 0) for u in updates if lo <= u.get("MatchStartTime", 0) < hi)
+
+            def best(key):
+                groups = {}
+                for m in comp:
+                    g = groups.setdefault(m["map"] if key == "map" else m["players"][me]["agent"], [0, 0])
+                    g[0] += 1
+                    g[1] += outcome(m, me) == "Win"
+                ok = [(k, g) for k, g in groups.items() if g[0] >= 2]
+                return max(ok, key=lambda kg: (kg[1][1] / kg[1][0], kg[1][0]), default=None)
+
+            return {"games": len(games), "comp": len(comp), "wins": wins, "rr": rr,
+                    "wr": 100 * wins / len(comp) if comp else None,
+                    "kd": sum(p["k"] for p in ps) / max(sum(p["d"] for p in ps), 1) if ps else None,
+                    "acs": sum(p["acs"] for p in ps) / len(ps) if ps else None,
+                    "best_map": best("map"), "best_agent": best("agent")}
+
+        cur, prev = summary(now - week, now + 1), summary(now - 2 * week, now - week)
+        if auto and not cur["games"]:
+            return
+        if auto:
+            self.set_option("last_report_week", datetime.now().strftime("%G-W%V"))
+
+        def delta(key, fmt):
+            if cur[key] is None or prev[key] is None:
+                return ""
+            diff = cur[key] - prev[key]
+            return f"   ({'▲' if diff > 0 else '▼' if diff < 0 else '='} {fmt.format(abs(diff))} vs the week before)"
+
+        lines = [
+            (f"{cur['games']} games ({cur['comp']} competitive){delta('games', '{:.0f}')}", FG),
+            (f"Competitive: {cur['wins']}W {cur['comp'] - cur['wins']}L"
+             + (f" · {cur['wr']:.0f}% win rate{delta('wr', '{:.0f}%')}" if cur["wr"] is not None else ""), FG),
+            (f"RR this week: {cur['rr']:+d}", WIN if cur["rr"] > 0 else LOSS if cur["rr"] < 0 else FG),
+            (f"KD {cur['kd']:.2f}{delta('kd', '{:.2f}')}" if cur["kd"] is not None else "KD —", FG),
+            (f"ACS {cur['acs']:.0f}{delta('acs', '{:.0f}')}" if cur["acs"] is not None else "ACS —", FG),
+        ]
+        for key, name, label in (("best_map", a.map, "Best map"), ("best_agent", a.agent, "Best agent")):
+            b = cur[key]
+            if b:
+                lines.append((f"{label}: {name(b[0])} · {round(100 * b[1][1] / b[1][0])}% WR in {b[1][0]} games", FG))
+        d = tk.Toplevel(self.root)
+        d.title("Weekly report")
+        d.configure(bg=BG, padx=18, pady=14)
+        d.resizable(False, False)
+        tk.Label(d, text="Your last 7 days", fg=FG, bg=BG, font=("Segoe UI Semibold", 13)).pack(anchor="w", pady=(0, 6))
+        for text, color in lines:
+            tk.Label(d, text=text, fg=color, bg=BG, font=("Segoe UI", 10), anchor="w").pack(anchor="w", pady=2)
+        tk.Label(d, text="From the matches VLite has saved on this PC.", fg=MUTED, bg=BG,
+                 font=("Segoe UI", 9)).pack(anchor="w", pady=(8, 0))
+        if auto:
+            self.notify("Your weekly VALORANT report", lines[1][0])
 
     def draw_rr(self):
         """Line chart of your RR over the last 20 competitive games (oldest left)."""
@@ -1840,6 +2001,8 @@ class App:
                 "kda": f'{p["k"]} / {p["d"]} / {p["a"]}', "kd": f'{p["k"] / max(p["d"], 1):.2f}', "acs": p["acs"],
                 "hs": f'{round(100 * p["head"] / p["hits"])}%' if p["hits"] else "—",
             })
+        for i, row in enumerate(rows):
+            row["gap_before"] = bool(i and rows[i - 1]["ally"] and not row["ally"])
         d = tk.Toplevel(self.root)
         d.title("Scoreboard")
         d.configure(bg=BG)
@@ -1909,6 +2072,16 @@ class App:
                     hist = self.riot.history()
                     self.hist_loaded = max(self.hist_loaded, HISTORY_COUNT)
                     self.post(self.show_profile, self.riot.rank(self.riot.puuid, fresh=True), hist)
+                    week = datetime.now().strftime("%G-W%V")
+                    if "last_report_week" not in self.settings:  # first run: start counting from next week
+                        self.settings["last_report_week"] = week
+                        save_settings(self.settings)
+                    elif self.settings["weekly_report"] and self.settings["last_report_week"] != week \
+                            and not self.want_weekly:
+                        self.want_weekly = "auto"
+                if self.want_weekly:
+                    how, self.want_weekly = self.want_weekly, False
+                    self.post(self.show_weekly, self.fetch_week(), how == "auto")
                 if self.want_more:
                     self.want_more = False
                     self.riot.history(20, start=self.hist_loaded)
@@ -1947,6 +2120,20 @@ class App:
                 delay = 10
             self.wake.wait(delay)
             self.wake.clear()
+
+    def fetch_week(self):
+        """Make sure the last 14 days of your matches are saved (this week + last week), then get RR changes."""
+        since = (time.time() - 14 * 86400) * 1000
+        while self.hist_loaded < 100:
+            page = self.riot.history(20, start=self.hist_loaded)
+            self.hist_loaded += 20
+            if len(page) < 20 or min(m["start"] for _mid, m, _rr in page) < since:
+                break
+        try:
+            return self.riot.rr_updates(since)
+        except Exception:
+            log.warning("RR history for weekly report unavailable", exc_info=True)
+            return []
 
     def check_update(self, manual):
         self.want_update = False
@@ -2133,6 +2320,9 @@ def self_test(app):
         ("hotkey re-register", lambda: app.set_hotkey(app.settings["hotkey"])),
         ("friends view", lambda: app.show_friends([{"puuid": "x", "game_name": "Test", "game_tag": "0"}], {})),
         ("comp check", lambda: app.comp_line([])),
+        ("pick tip", lambda: app.pick_tip([], None)),
+        ("weekly report", lambda: app.show_weekly([], False)),
+        ("compact overlay", lambda: (app.set_option("ov_compact", True), app.set_option("ov_compact", False))),
         ("diagnostics", app.copy_diagnostics),
         ("update banner", lambda: (app.show_update("v0.0.0", "https://github.com", None), app.banner.pack_forget())),
     ]

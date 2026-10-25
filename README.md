@@ -2,7 +2,7 @@
 
 # VLite — lightweight Valorant tracker (Windows)
 
-A single ~2,100-line Python file, no dependencies. Shows what the Tracker.gg app shows at its core:
+A single ~2,400-line Python file, no dependencies. Shows what the Tracker.gg app shows at its core:
 
 - **Live match** (agent select + in game), for every teammate and opponent:
   - agent, name, level, rank + RR, peak rank, act win rate
@@ -15,8 +15,12 @@ A single ~2,100-line Python file, no dependencies. Shows what the Tracker.gg app
 - Agent portraits, rank badges and the map banner are downloaded once from valorant-api.com and saved to `%LOCALAPPDATA%\VLite\img`. Rank names are built in, so they show even offline.
 - **⚑ Flags**: your private notes on players ("threw", "AFK", "great duo"). Right-click anyone in the Live tab to flag them, or open **⚑ Flags** after a match to flag players from your last 3 lobbies. Flagged players show up in orange with your note when you meet them again. Only players whose names were visible can be flagged, and a flag never shows on someone who's hidden. Notes are stored only on your PC.
 - **My profile**: current rank/RR/peak, your **session** (W/L, RR, streak and KD for games less than 3 hours apart), a **rank-progress graph** of your last 20 competitive games (hover a point for details), and your last 20 matches with map, agent, result, score, K/D/A, KD, HS%, ACS and RR change. Double-click a match to see its **scoreboard**. Names show only for players VLite saw with visible names in that match.
+- **Rank goal** (Profile): RR to your next rank, how many wins that is at your average gain, and how many games at your current win rate.
+- **Weekly report**: your last 7 days vs the week before (games, win rate, RR, KD, ACS, best map and agent). It shows on your first launch each week, or anytime from Profile → Weekly report.
 - **Stats**: your competitive win %, KD, ACS and HS% per map and per agent, from every match saved on this PC. "Load 20 older matches" pulls in more history.
 - **Team comp check** (agent select + in game): your team's roles, e.g. `2 Duelist · 1 Initiator · 1 Controller`, with warnings like "⚠ no controller" or "3 duelists". Hovered picks count, so you can plan before locking.
+- **Agent pick tips** (agent select): which role your team still needs, and your best agent for it on this map from your own history, e.g. `Tip: your team still needs a Controller · your best pick: Omen, 68% WR on this map (9 games)`.
+- **Free-for-all view** (Deathmatch): one list sorted by rank, with no ally/enemy split.
 - **Map form**: your record on the current map (`You on Ascent: 64% WR · 1.21 KD (11 games)`), in the Live tab and overlay title.
 - **Post-match recap**: after each game, a small card with your K/D/A, ACS, HS% and KD compared to your usual, your ACS rank on your team, and RR change.
 - **Friends**: who's in a match (map, mode, score), in agent select, in menus (party size), away or playing another Riot game, with their rank. It's read from the Riot Client on your PC, like the in-game friends list.
@@ -43,6 +47,7 @@ If you'd rather skip building, double-click `VLite.bat` to run it straight from 
 ## In-game overlay
 - Set VALORANT to **Windowed Fullscreen** (Settings → Video → Display Mode). Exclusive fullscreen draws over every other window.
 - Press **F6** in game to show or hide the overlay.
+- **Compact overlay** (Settings): one short line per player with party dot, agent, rank badge, KD and flag mark.
 - **Settings** (button in the main window) lets you change the hotkey, corner, size (Small/Normal/Large), opacity, and which columns the overlay shows. Changes apply instantly and are remembered.
 - The overlay is click-through and never takes focus, so your aim and keys stay in the game.
 - **Settings → Automation**: show the overlay automatically in agent select, hide it when the match starts, pop it up when a flagged player is in your lobby, and show session stats in the overlay title.
