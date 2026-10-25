@@ -23,15 +23,20 @@ Requires only Python 3.9+ from python.org (standard library, nothing to pip inst
 """
 import base64
 import json
+import logging
+import logging.handlers
 import os
+import platform
 import queue
 import re
 import ssl
+import subprocess
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
+import webbrowser
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -90,7 +95,8 @@ if WINDOWS:
     shell32.ExtractIconW.restype = wintypes.HICON
     shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
+GITHUB_REPO = "AllenAJ/vLite"  # releases here are where update checks look
 APPDATA = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
 # The app icon: next to this file when run from source, unpacked to sys._MEIPASS inside the built exe.
 ICON = os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))), "assets", "VLite.ico")
@@ -124,6 +130,15 @@ SETTINGS_FILE = os.path.join(CACHE_DIR, "settings.json")
 FLAGS_FILE = os.path.join(CACHE_DIR, "flags.json")  # your private notes: puuid -> {name, note, at}
 LOBBIES_FILE = os.path.join(CACHE_DIR, "lobbies.json")  # visible players from your last few matches
 FLAG_COLOR = "#ffb347"
+CROSSHAIRS_FILE = os.path.join(CACHE_DIR, "crosshairs.json")
+LOG_FILE = os.path.join(CACHE_DIR, "vlite.log")
+log = logging.getLogger("vlite")
+ROLES = ["Duelist", "Initiator", "Controller", "Sentinel"]
+# Used only if valorant-api.com couldn't be reached; new agents get their role from there.
+ROLE_FALLBACK = {**dict.fromkeys(["Jett", "Phoenix", "Raze", "Reyna", "Yoru", "Neon", "Iso", "Waylay"], "Duelist"),
+                 **dict.fromkeys(["Sova", "Breach", "Skye", "KAY/O", "Fade", "Gekko", "Tejo"], "Initiator"),
+                 **dict.fromkeys(["Brimstone", "Viper", "Omen", "Astra", "Harbor", "Clove"], "Controller"),
+                 **dict.fromkeys(["Killjoy", "Cypher", "Sage", "Chamber", "Deadlock", "Vyse"], "Sentinel")}
 STATE_LABEL = {"menus": "In menus", "pregame": "Agent select", "ingame": "In game"}
 
 # The Riot Client serves its local API on 127.0.0.1 with a self-signed cert, so
@@ -172,7 +187,7 @@ class Assets:
     """Agent/map/rank names from valorant-api.com, cached so it works offline."""
 
     def __init__(self):
-        self.agents, self.maps, self.tiers, self.version = {}, {}, {}, ""
+        self.agents, self.maps, self.tiers, self.version, self.roles = {}, {}, {}, "", {}
 
     def load(self):
         path = os.path.join(CACHE_DIR, "assets.json")
@@ -188,6 +203,7 @@ class Assets:
             except OSError:
                 data = {"agents": {}, "maps": {}, "tiers": {}, "version": ""}
         self.agents, self.maps, self.icons = data["agents"], data["maps"], data.get("icons", {})
+        self.roles = data.get("roles", {})
         self.tiers = {int(k): v for k, v in data["tiers"].items()}
         self.version = data["version"]
 
@@ -200,6 +216,7 @@ class Assets:
         tiers = get("/competitivetiers")[-1]["tiers"]
         return {
             "agents": {a["uuid"].lower(): a["displayName"] for a in agents},
+            "roles": {a["uuid"].lower(): (a.get("role") or {}).get("displayName") for a in agents},
             "maps": {m["mapUrl"]: m["displayName"] for m in maps},
             "tiers": {t["tier"]: [t["tierName"].title(), "#" + (t.get("color") or "ffffffff")[:6]] for t in tiers},
             "icons": {
@@ -250,6 +267,10 @@ class Assets:
 
     def agent(self, uuid):
         return self.agents.get((uuid or "").lower(), "—") if uuid else "—"
+
+    def role(self, uuid):
+        uuid = (uuid or "").lower()
+        return self.roles.get(uuid) or ROLE_FALLBACK.get(self.agents.get(uuid, ""))
 
     def map(self, url):
         return self.maps.get(url, (url or "?").rsplit("/", 1)[-1])
@@ -613,6 +634,14 @@ class Riot:
             self._enc = enc
         return self._enc
 
+    def friends(self):
+        """Your friends list and their presence, from the Riot Client on this PC (no web requests)."""
+        friends = self._local_get("/chat/v4/friends").get("friends") or []
+        presences = {}
+        for p in self._local_get("/chat/v4/presences").get("presences") or []:
+            presences.setdefault(p.get("puuid"), []).append(p)
+        return friends, presences
+
     def my_party(self, match_id):
         """Who you queued with, straight from Riot's party service (asked once per match)."""
         if self._party[0] != match_id:
@@ -701,7 +730,7 @@ def load_settings():
     settings = {"hotkey": "F6", "corner": "Top right", "ov_size": "Normal", "ov_opacity": 88,
                 "ov_cols": ["party", "agent", "player", "rank", "kd", "acs", "last", "met"],
                 "auto_show_pregame": True, "auto_hide_ingame": False, "popup_flagged": True, "notify": True,
-                "tray": True, "startup": False, "ov_session": True}
+                "tray": True, "startup": False, "ov_session": True, "check_updates": True, "recap": True}
     try:
         with open(SETTINGS_FILE) as f:
             settings.update(json.load(f))
@@ -723,7 +752,7 @@ def load_json(path, default):
 
 
 def save_json(path, data):
-    os.makedirs(CACHE_DIR, exist_ok=True)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         json.dump(data, f)
 
@@ -889,7 +918,7 @@ class Overlay:
         w.overrideredirect(True)
         w.attributes("-topmost", True)
         w.configure(bg=OV_BG)
-        self.head = tk.Label(w, bg=OV_BG, fg=FG, anchor="w", padx=10)
+        self.head = tk.Label(w, bg=OV_BG, fg=FG, anchor="w", justify="left", padx=10)
         self.head.pack(fill="x", pady=(8, 2))
         self.apply()
         w.update_idletasks()
@@ -986,6 +1015,7 @@ class App:
         self.form_pending = set()
         self.settings = load_settings()
         self.images = Images()
+        self.crosshairs = load_json(CROSSHAIRS_FILE, [])
         self._build()
         self.overlay = Overlay(root, self.settings, self.images)
         self.dlg = self.flag_dlg = None
@@ -995,7 +1025,10 @@ class App:
         self._flag_seen = (None, set())
         self.session_short = ""
         self.hist_loaded = 0  # how many of your matches have been paged in (Stats tab "load more")
-        self.want_more = self.want_store = False
+        self.want_more = self.want_store = self.want_update = False
+        self.friends_visible, self.friends_at = False, 0
+        self.recap_tries, self.last_top = 0, None  # post-match recap: retries left, newest match seen
+        self._map_form = (None, None)
         self.tray = Tray(lambda: self.post(self.open_window), lambda: self.post(self.overlay.toggle),
                          lambda: self.post(self.quit))
         root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -1033,6 +1066,7 @@ class App:
         r.option_add("*TCombobox*Listbox.background", PANEL)
         r.option_add("*TCombobox*Listbox.foreground", FG)
         s.configure("Muted.TLabel", foreground=MUTED)
+        s.configure("TEntry", fieldbackground=PANEL, foreground=FG, insertcolor=FG)
 
         top = ttk.Frame(r)
         top.pack(fill="x", padx=10, pady=8)
@@ -1045,14 +1079,20 @@ class App:
 
         self.tabs = ttk.Notebook(r)
         self.tabs.pack(fill="both", expand=True)
-        live, prof, stats, store = (ttk.Frame(self.tabs) for _ in range(4))
+        live, prof, stats, friends, xhair, store = (ttk.Frame(self.tabs) for _ in range(6))
         self.tabs.add(live, text="Live match")
         self.tabs.add(prof, text="My profile")
         self.tabs.add(stats, text="Stats")
+        self.tabs.add(friends, text="Friends")
+        self.tabs.add(xhair, text="Crosshairs")
         self.tabs.add(store, text="Store")
+        self.tabs.bind("<<NotebookTabChanged>>", self.tab_changed)
+        self.banner = tk.Frame(r, bg="#2a3a1f", padx=12, pady=6)  # "update available", packed when needed
 
         self.live_head = ttk.Label(live, style="Head.TLabel", compound="left")
-        self.live_head.pack(anchor="w", padx=10, pady=8)
+        self.live_head.pack(anchor="w", padx=10, pady=(8, 0))
+        self.live_sub = ttk.Label(live, style="Muted.TLabel")
+        self.live_sub.pack(anchor="w", padx=12, pady=(2, 8))
         self.live_table = PlayerTable(live, ALL_COLS, self.images, BG, icon_px=28, size=10,
             row_bg=lambda row: ALLY_BG if row["ally"] else ENEMY_BG, on_menu=self.row_menu)
         self.live_table.pack(anchor="nw", padx=10, pady=(0, 4))
@@ -1101,6 +1141,31 @@ class App:
         self.wallet_lbl.pack(side="left", padx=14)
         self.store_body = ttk.Frame(store)
         self.store_body.pack(fill="both", expand=True, padx=10)
+
+        self.friends_head = ttk.Label(friends, style="Head.TLabel", text="Friends")
+        self.friends_head.pack(anchor="w", padx=10, pady=8)
+        self.friends_tree = make_tree(friends, [("Status", 420), ("Rank", 140), ("Level", 70)], icon_col=("Friend", 260))
+        ttk.Label(friends, text="Read from the Riot Client on this PC, like the in-game friends list. Updates every 15 s.",
+                  style="Muted.TLabel").pack(anchor="w", padx=12, pady=(0, 8))
+
+        form = ttk.Frame(xhair)
+        form.pack(fill="x", padx=10, pady=8)
+        ttk.Label(form, text="Name", style="Muted.TLabel").pack(side="left")
+        self.xh_name = ttk.Entry(form, width=22)
+        self.xh_name.pack(side="left", padx=(6, 14))
+        ttk.Label(form, text="Code", style="Muted.TLabel").pack(side="left")
+        self.xh_code = ttk.Entry(form, width=60)
+        self.xh_code.pack(side="left", padx=6)
+        ttk.Button(form, text="Save", command=self.save_crosshair).pack(side="left", padx=6)
+        self.xh_tree = make_tree(xhair, [("Code", 760)], icon_col=("Name", 220))
+        self.xh_tree.bind("<Double-1>", lambda e: self.copy_crosshair(self.xh_tree.identify_row(e.y)))
+        bar = ttk.Frame(xhair)
+        bar.pack(fill="x", padx=10, pady=(0, 8))
+        ttk.Button(bar, text="Copy code", command=lambda: self.copy_crosshair(self.xh_tree.focus())).pack(side="left")
+        ttk.Button(bar, text="Delete", command=self.delete_crosshair).pack(side="left", padx=6)
+        ttk.Label(bar, text="Double-click to copy. In VALORANT: Settings → Crosshair → Import Profile Code, then paste.",
+                  style="Muted.TLabel").pack(side="left", padx=10)
+        self.show_crosshairs()
 
     def set_hotkey(self, combo=None):
         combo = combo or self.settings["hotkey"]
@@ -1166,13 +1231,21 @@ class App:
                 ("popup_flagged", "Show the overlay when a flagged player is in your lobby"),
                 ("notify", "Windows notifications (match found, flagged player in lobby)"),
                 ("tray", "Closing the window keeps VLite running in the tray"),
-                ("startup", "Start VLite with Windows")]):
+                ("startup", "Start VLite with Windows"),
+                ("recap", "Show a recap after each match"),
+                ("check_updates", "Check for VLite updates when it starts")]):
             var = tk.BooleanVar(value=self.settings[key])
             ttk.Checkbutton(auto, text=text, variable=var,
                             command=lambda k=key, v=var: self.set_option(k, v.get())).grid(row=i, column=0, sticky="w", pady=1)
         row(5, "Automation", auto)
+        help_row = ttk.Frame(f)
+        ttk.Button(help_row, text="Copy diagnostics", command=self.copy_diagnostics).pack(side="left")
+        ttk.Button(help_row, text="Check for updates", command=self.check_updates_now).pack(side="left", padx=6)
+        ttk.Button(help_row, text="Open data folder", command=lambda: webbrowser.open(CACHE_DIR)).pack(side="left")
+        ttk.Label(help_row, text=f"VLite {VERSION}", style="Muted.TLabel").pack(side="left", padx=10)
+        row(7, "Help", help_row)
         ttk.Label(f, text="Changes apply instantly. The overlay stays shown while you adjust it.",
-                  style="Muted.TLabel").grid(row=6, column=0, columnspan=2, sticky="w", pady=(12, 0))
+                  style="Muted.TLabel").grid(row=8, column=0, columnspan=2, sticky="w", pady=(12, 0))
         self.overlay.show(True)
 
     def set_option(self, key, value):
@@ -1237,6 +1310,7 @@ class App:
         hide = f'{self.settings["hotkey"]} to hide'
         if not kind:
             self.live_head.config(text="Not in a match — players show up here in agent select and in game.", image="")
+            self.live_sub.config(text="")
             self.live_table.render([])
             self.overlay.render(f"Not in a match · {hide}", [])
             return
@@ -1281,7 +1355,9 @@ class App:
             })
         self.live_table.render(table)
         session = f" · {self.session_short}" if self.settings["ov_session"] and self.session_short else ""
-        self.overlay.render(f"{head}{session} · {hide}", table)
+        sub = "   ".join(x for x in (self.comp_line(table), self.map_form(match.get("MapID"))) if x)
+        self.live_sub.config(text=sub)
+        self.overlay.render(f"{head}{session} · {hide}" + (f"\n{sub}" if sub else ""), table)
         self.alert_flagged(match.get("ID"), table)
         self.remember_lobby(match.get("ID"), a.map(match.get("MapID")), [
             {"puuid": r["puuid"], "name": r["player"], "agent_id": r["agent_id"], "ally": r["ally"]}
@@ -1303,6 +1379,36 @@ class App:
             lobby["players"] = list(merged.values())
             save_json(LOBBIES_FILE, self.lobbies)
             self.fill_flags()
+
+    def comp_line(self, table):
+        """Your team's roles (hovered picks count, so you can plan), with a warning for gaps."""
+        roles = Counter(self.assets.role(r["agent_id"]) for r in table if r["ally"] and r["agent_id"])
+        roles.pop(None, None)
+        if not roles:
+            return ""
+        picked = sum(roles.values())
+        text = "Your comp: " + " · ".join(f"{roles[r]} {r}" for r in ROLES if roles[r])
+        warn = ["no controller"] if not roles["Controller"] and picked >= 3 else []
+        if picked >= 5:
+            warn += [f"no {r.lower()}" for r in ("Initiator", "Sentinel") if not roles[r]]
+        if roles["Duelist"] >= 3:
+            warn.append(f'{roles["Duelist"]} duelists')
+        return text + ("   ⚠ " + ", ".join(warn) if warn else "")
+
+    def map_form(self, map_id):
+        """Your competitive record on this map, e.g. 'You on Ascent: 64% WR · 1.21 KD (11 games)'."""
+        key = (map_id, len(self.riot._matches))
+        if self._map_form[0] != key:
+            me = self.riot.puuid
+            games = [m for _mid, m in self.riot.my_matches() if m["map"] == map_id]
+            text = ""
+            if games:
+                wins = sum(outcome(m, me) == "Win" for m in games)
+                kd = sum(m["players"][me]["k"] for m in games) / max(sum(m["players"][me]["d"] for m in games), 1)
+                text = (f"You on {self.assets.map(map_id)}: {round(100 * wins / len(games))}% WR · {kd:.2f} KD "
+                        f"({len(games)} game{'s' if len(games) > 1 else ''})")
+            self._map_form = (key, text)
+        return self._map_form[1]
 
     def alert_flagged(self, match_id, table):
         """Tell you once per match when someone you flagged is in the lobby."""
@@ -1412,6 +1518,7 @@ class App:
             self.prof_head.config(image=badge or "", text=f'{"  " if badge else ""}{self.me_name} · {a.rank(rk["tier"])}'
                                                           f'{" " + str(rk["rr"]) + " RR" if rk["tier"] else ""}'
                                                           f' · Peak {a.rank(rk["peak"])}{wr}')
+        self.check_recap(hist)
         self.show_session(hist)
         self.draw_rr()
         self.hist.delete(*self.hist.get_children())
@@ -1430,6 +1537,64 @@ class App:
                 f'{round(100 * p["head"] / p["hits"])}%' if p["hits"] else "—", p["acs"],
                 "" if rr is None else f"{rr:+d}"))
         self.show_stats()
+
+    def check_recap(self, hist):
+        """After a match ends, wait for it to show up in your history, then show the recap once."""
+        top = hist[0] if hist else None
+        if self.recap_tries and top and self.last_top is not None and top[0] != self.last_top:
+            self.recap_tries = 0
+            if self.settings["recap"]:
+                self.show_recap(*top)
+        elif self.recap_tries:
+            self.recap_tries -= 1
+            if self.recap_tries:
+                threading.Timer(60, self.refresh).start()  # Riot hasn't published it yet
+        if top:
+            self.last_top = top[0]
+
+    def show_recap(self, mid, m, rr):
+        me, a = self.riot.puuid, self.assets
+        p = m["players"].get(me)
+        if not p:
+            return
+        others = [x["players"][me] for i, x in self.riot.my_matches(m["queue"]) if i != mid]
+        result = outcome(m, me)
+        kd = p["k"] / max(p["d"], 1)
+        hs = 100 * p["head"] / p["hits"] if p["hits"] else None
+
+        def vs(value, avg, fmt):
+            if avg is None:
+                return ""
+            diff = value - avg
+            return f"  ({'+' if diff >= 0 else '−'}{fmt.format(abs(diff))} vs your usual {fmt.format(avg)})"
+
+        avg_acs = sum(o["acs"] for o in others) / len(others) if others else None
+        avg_kd = sum(o["k"] for o in others) / max(sum(o["d"] for o in others), 1) if others else None
+        hits = sum(o["hits"] for o in others)
+        avg_hs = 100 * sum(o["head"] for o in others) / hits if hits else None
+        team = sorted((x for x in m["players"].values() if x["team"] == p["team"]), key=lambda x: -x["acs"])
+        place = next(i for i, x in enumerate(team, 1) if x is p)
+        lines = [
+            (f"{result} {score(m, me)} · {a.map(m['map'])} · {a.agent(p['agent'])}"
+             + ("" if rr is None else f" · {rr:+d} RR"), WIN if result == "Win" else LOSS if result == "Loss" else FG),
+            (f"K / D / A  {p['k']} / {p['d']} / {p['a']}   ·   KD {kd:.2f}{vs(kd, avg_kd, '{:.2f}')}", FG),
+            (f"ACS {p['acs']}{vs(p['acs'], avg_acs, '{:.0f}')}   ·   #{place} of {len(team)} on your team", FG),
+            (f"Headshots {hs:.0f}%{vs(hs, avg_hs, '{:.0f}%')}" if hs is not None else "Headshots —", FG),
+        ]
+        self.notify("Match recap", lines[0][0] + f" · ACS {p['acs']}")
+        d = tk.Toplevel(self.root)
+        d.title("Match recap")
+        d.configure(bg=BG, padx=18, pady=14)
+        d.resizable(False, False)
+        icon = self.images.get("agent", p["agent"], 48)
+        top = tk.Frame(d, bg=BG)
+        top.pack(anchor="w")
+        if icon:
+            tk.Label(top, image=icon, bg=BG).pack(side="left", padx=(0, 12))
+        tk.Label(top, text=lines[0][0], fg=lines[0][1], bg=BG, font=("Segoe UI Semibold", 13)).pack(side="left")
+        for text, color in lines[1:]:
+            tk.Label(d, text=text, fg=color, bg=BG, font=("Segoe UI", 10), anchor="w").pack(anchor="w", pady=2)
+        ttk.Button(d, text="Scoreboard", command=lambda: self.open_scoreboard(mid)).pack(anchor="e", pady=(10, 0))
 
     def show_session(self, hist):
         """Session = your recent games with less than 3 hours between them."""
@@ -1520,6 +1685,131 @@ class App:
                     g[0], f"{round(100 * g[1] / g[0])}%", f"{g[2] / max(g[3], 1):.2f}", round(g[4] / g[0]),
                     f"{round(100 * g[5] / g[6])}%" if g[6] else "—"))
 
+    # ---------- updates & diagnostics ----------
+    def check_updates_now(self):
+        self.want_update = "manual"
+        self.set_status("Checking for updates…")
+        self.wake.set()
+
+    def show_update(self, tag, page, exe):
+        b = self.banner
+        for child in b.winfo_children():
+            child.destroy()
+        tk.Label(b, text=f"VLite {tag} is available (you have {VERSION}).", bg=b["bg"], fg=FG,
+                 font=("Segoe UI Semibold", 10)).pack(side="left")
+        if getattr(sys, "frozen", False) and exe:
+            ttk.Button(b, text="Update now", command=lambda: self.start_update(exe, page)).pack(side="left", padx=10)
+        else:
+            ttk.Button(b, text="Download", command=lambda: webbrowser.open(page)).pack(side="left", padx=10)
+        ttk.Button(b, text="What's new", command=lambda: webbrowser.open(page)).pack(side="left")
+        ttk.Button(b, text="Later", command=b.pack_forget).pack(side="right")
+        b.pack(fill="x", before=self.tabs)
+
+    def start_update(self, exe_url, page):
+        self.set_status("Downloading update…")
+        threading.Thread(target=self._update, args=(exe_url, page), daemon=True).start()
+
+    def _update(self, exe_url, page):
+        """Download the new VLite.exe next to this one, then swap it in after VLite closes and restart."""
+        exe = sys.executable
+        new = exe + ".new"
+        try:
+            with _WEB.open(urllib.request.Request(exe_url, headers={"User-Agent": "VLite"}), timeout=120) as r:
+                data = r.read()
+            if not data.startswith(b"MZ") or len(data) < 1_000_000:
+                raise ValueError("download doesn't look like VLite.exe")
+            with open(new, "wb") as f:
+                f.write(data)
+            bat = os.path.join(os.environ.get("TEMP", CACHE_DIR), "vlite_update.bat")
+            with open(bat, "w") as f:
+                f.write(f'@echo off\r\nset n=0\r\n:retry\r\nping -n 2 127.0.0.1 >nul\r\n'
+                        f'move /y "{new}" "{exe}" >nul 2>&1 && goto done\r\nset /a n+=1\r\n'
+                        f'if %n% lss 30 goto retry\r\n:done\r\nstart "" "{exe}"\r\ndel "%~f0"\r\n')
+            subprocess.Popen(["cmd", "/c", bat], creationflags=0x08000000)  # CREATE_NO_WINDOW
+            log.info("update downloaded, restarting")
+            self.post(self.quit)
+        except Exception as e:
+            log.exception("update failed")
+            self.post(self.set_status, f"Update failed ({e}); opening the download page instead.")
+            webbrowser.open(page)
+
+    def copy_diagnostics(self):
+        try:
+            with open(LOG_FILE, encoding="utf-8", errors="replace") as f:
+                tail = f.read().splitlines()[-150:]
+        except OSError:
+            tail = ["(no log yet)"]
+        text = "\n".join([
+            f"VLite {VERSION} ({'exe' if getattr(sys, 'frozen', False) else 'source'})",
+            platform.platform(), f"Python {platform.python_version()}",
+            f"Status: {self.status.cget('text')}", f"Region: {self.riot.region or '?'} · state: {self.kind}",
+            f"Settings: {json.dumps(self.settings)}", "--- log ---", *tail])
+        self.root.clipboard_clear()
+        self.root.clipboard_append(redact(text))
+        self.root.update()
+        self.set_status("Diagnostics copied. Paste them into your message (player IDs are removed).")
+
+    # ---------- friends ----------
+    def tab_changed(self, _event=None):
+        self.friends_visible = self.tabs.index("current") == 3
+        if self.friends_visible:
+            self.friends_at = 0
+            self.wake.set()
+
+    def show_friends(self, friends, presences):
+        tree, a = self.friends_tree, self.assets
+        tree.delete(*tree.get_children())
+        rows = []
+        for fr in friends:
+            order, status, tier, level = friend_status(presences.get(fr.get("puuid")), a)
+            name = f'{fr.get("game_name") or "?"}#{fr.get("game_tag") or ""}'
+            rows.append((order, name.lower(), name, status, tier, level))
+        rows.sort()
+        online = [r for r in rows if r[0] < 9]
+        self.friends_head.config(text=f"Friends · {len(online)} online · {len(rows) - len(online)} offline")
+        offline = None
+        for order, _key, name, status, tier, level in rows:
+            parent = ""
+            if order == 9:
+                offline = offline or tree.insert("", "end", text=f" Offline ({len(rows) - len(online)})", open=False)
+                parent = offline
+            badge = self.images.get("tier", tier, 22) if tier else None
+            tree.insert(parent, "end", text=" " + name, **({"image": badge} if badge else {}), values=(
+                status, a.rank(tier) if tier else "", level or ""))
+
+    # ---------- crosshairs ----------
+    def show_crosshairs(self):
+        self.xh_tree.delete(*self.xh_tree.get_children())
+        for i, x in enumerate(self.crosshairs):
+            self.xh_tree.insert("", "end", iid=str(i), text=" " + x["name"], values=(x["code"],))
+
+    def save_crosshair(self):
+        name, code = self.xh_name.get().strip(), self.xh_code.get().strip()
+        if not code.startswith("0;"):
+            self.set_status("That doesn't look like a crosshair code. In VALORANT: Crosshair → Export Profile Code.")
+            return
+        self.crosshairs.append({"name": name or f"Crosshair {len(self.crosshairs) + 1}", "code": code})
+        save_json(CROSSHAIRS_FILE, self.crosshairs)
+        self.xh_name.delete(0, "end")
+        self.xh_code.delete(0, "end")
+        self.show_crosshairs()
+
+    def copy_crosshair(self, iid):
+        if not iid:
+            return
+        x = self.crosshairs[int(iid)]
+        self.root.clipboard_clear()
+        self.root.clipboard_append(x["code"])
+        self.root.update()
+        self.set_status(f'Copied "{x["name"]}". In VALORANT: Settings → Crosshair → Import Profile Code → paste.')
+
+    def delete_crosshair(self):
+        iid = self.xh_tree.focus()
+        if iid:
+            del self.crosshairs[int(iid)]
+            save_json(CROSSHAIRS_FILE, self.crosshairs)
+            self.show_crosshairs()
+
     def load_more(self):
         self.want_more = True
         self.set_status("Loading older matches…")
@@ -1598,6 +1888,7 @@ class App:
         self.post(self.set_status, "Loading game data and icons (first start takes a few seconds)…")
         self.assets.load()
         self.assets.download_icons()
+        self.want_update = self.want_update or self.settings["check_updates"]
         while True:
             delay = POLL_SECONDS
             try:
@@ -1618,10 +1909,19 @@ class App:
                 if self.want_store:
                     self.want_store = False
                     self.post(self.show_store, self.fetch_store())
+                if self.want_update:
+                    self.check_update(manual=self.want_update == "manual")
+                if self.friends_visible and time.time() - self.friends_at > 15:
+                    self.friends_at = time.time()
+                    try:
+                        self.post(self.show_friends, *self.riot.friends())
+                    except Exception:
+                        log.warning("friends list unavailable", exc_info=True)
                 self.poll_match()
                 self.post(self.set_status, f"● {self.me_name} · {self.riot.region.upper()} · "
                                            f"{STATE_LABEL[self.kind]}  |  {self.hotkey_note}")
             except urllib.error.HTTPError as e:
+                log.warning("HTTP %s from %s", e.code, e.url)
                 if e.code == 429:
                     self.post(self.set_status, "Riot asked us to slow down — pausing 60s")
                     delay = 60
@@ -1633,11 +1933,26 @@ class App:
                 self.post(self.set_status, "Waiting for the Riot Client / VALORANT to start…")
                 delay = 10
             except Exception as e:
+                log.exception("worker error")
                 self.riot.puuid = None
                 self.post(self.set_status, f"Reconnecting… ({e})")
                 delay = 10
             self.wake.wait(delay)
             self.wake.clear()
+
+    def check_update(self, manual):
+        self.want_update = False
+        try:
+            tag, page, exe = latest_release()
+        except Exception as e:
+            log.warning("update check failed: %s", e)
+            if manual:
+                self.post(self.set_status, f"Couldn't check for updates ({e}).")
+            return
+        if parse_version(tag) > parse_version(VERSION):
+            self.post(self.show_update, tag, page, exe)
+        elif manual:
+            self.post(self.set_status, f"You're on the latest version ({VERSION}).")
 
     def fetch_store(self):
         try:
@@ -1667,6 +1982,7 @@ class App:
         if kind == "menus":
             if self.kind != "menus":  # a match just ended: pull it into history shortly
                 self.post(self.show_live, None, None, [], {}, {}, {}, {})
+                self.recap_tries = 4  # the recap shows once the match appears in your history
                 threading.Timer(45, self.refresh).start()
             self.kind = kind
             return
@@ -1701,6 +2017,68 @@ VP_ID, RAD_ID, KC_ID = ("85ad13f7-3d1b-5128-9eb2-7cd8ee0b5741", "e59aa87c-4cbf-5
                         "85ca954a-41f2-ce94-9b45-8ca3dd39a00d")
 
 
+def parse_version(text):
+    return tuple(int(x) for x in re.findall(r"\d+", text)[:3])
+
+
+def latest_release():
+    """(tag, release page, VLite.exe download URL) of the newest GitHub release."""
+    rel = request("GET", f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+                  {"User-Agent": "VLite", "Accept": "application/vnd.github+json"})
+    exe = next((a["browser_download_url"] for a in rel.get("assets") or [] if a["name"].lower() == "vlite.exe"), None)
+    return rel["tag_name"], rel["html_url"], exe
+
+
+def friend_status(presences, assets):
+    """(sort order, status text, competitive tier, account level) from a friend's presence."""
+    if not presences:
+        return 9, "Offline", None, None
+    val = next((p for p in presences if p.get("product") == "valorant"), None)
+    if not val:
+        product = presences[0].get("product") or ""
+        names = {"league_of_legends": "League of Legends", "tft": "TFT", "lor": "Legends of Runeterra",
+                 "keystone": "Riot Client"}
+        return 5, f"Online · {names.get(product, product or 'Riot')}", None, None
+    try:
+        priv = json.loads(base64.b64decode(val.get("private") or ""))
+    except (ValueError, TypeError):
+        priv = {}
+    flat = dict(priv)  # older presences are flat; newer ones nest these sections
+    for section in ("matchPresenceData", "partyPresenceData", "playerPresenceData"):
+        flat.update(priv.get(section) or {})
+    tier, level = flat.get("competitiveTier"), flat.get("accountLevel")
+    queue_id = flat.get("queueId") or ""
+    mode = QUEUE_NAMES.get(queue_id, queue_id.title()) if queue_id else ""
+    where = " · ".join(x for x in (assets.map(flat["matchMap"]) if flat.get("matchMap") else "", mode) if x)
+    loop = flat.get("sessionLoopState")
+    if loop == "INGAME":
+        ally, enemy = flat.get("partyOwnerMatchScoreAllyTeam"), flat.get("partyOwnerMatchScoreEnemyTeam")
+        score = f" · {ally}–{enemy}" if ally is not None and enemy is not None and (ally or enemy) else ""
+        return 0, f"In match · {where}{score}", tier, level
+    if loop == "PREGAME":
+        return 1, f"Agent select · {where}", tier, level
+    if flat.get("isIdle") or val.get("state") == "away":
+        return 3, "Away", tier, level
+    size, max_size = flat.get("partySize"), flat.get("maxPartySize")
+    party = f" · party {size}/{max_size}" if size and max_size and size > 1 else ""
+    return 2, f"In menus{' · ' + mode if mode else ''}{party}", tier, level
+
+
+def redact(text):
+    """Diagnostics go to whoever you paste them to: strip player/match IDs."""
+    return re.sub(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", "<id>", text)
+
+
+def setup_logging():
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    handler = logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=300_000, backupCount=1, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
+    threading.excepthook = lambda a: log.error("background thread crashed",
+                                               exc_info=(a.exc_type, a.exc_value, a.exc_traceback))
+
+
 def duration(seconds):
     hours, minutes = divmod(int(seconds or 0) // 60, 60)
     return f"{hours // 24}d {hours % 24}h" if hours >= 24 else f"{hours}h {minutes}m"
@@ -1712,7 +2090,10 @@ def main():
             ctypes.windll.shcore.SetProcessDpiAwareness(1)  # crisp text on high-DPI screens
         except Exception:
             pass
+    setup_logging()
+    log.info("VLite %s starting (%s)", VERSION, platform.platform())
     root = tk.Tk()
+    root.report_callback_exception = lambda *exc: log.error("UI error", exc_info=exc)
     app = App(root)
     if "--selftest" in sys.argv:
         root.after(5000, lambda: self_test(app))
@@ -1733,6 +2114,10 @@ def self_test(app):
         ("rank graph", app.draw_rr),
         ("notification", lambda: app.tray.notify("VLite self-test", "Everything loaded.")),
         ("hotkey re-register", lambda: app.set_hotkey(app.settings["hotkey"])),
+        ("friends view", lambda: app.show_friends([{"puuid": "x", "game_name": "Test", "game_tag": "0"}], {})),
+        ("comp check", lambda: app.comp_line([])),
+        ("diagnostics", app.copy_diagnostics),
+        ("update banner", lambda: (app.show_update("v0.0.0", "https://github.com", None), app.banner.pack_forget())),
     ]
     for name, check in checks:
         try:

@@ -2,7 +2,7 @@
 
 # VLite — lightweight Valorant tracker (Windows)
 
-A single ~1,700-line Python file, no dependencies. Shows what the Tracker.gg app shows at its core:
+A single ~2,100-line Python file, no dependencies. Shows what the Tracker.gg app shows at its core:
 
 - **Live match** (agent select + in game), for every teammate and opponent:
   - agent, name, level, rank + RR, peak rank, act win rate
@@ -16,6 +16,11 @@ A single ~1,700-line Python file, no dependencies. Shows what the Tracker.gg app
 - **⚑ Flags**: your private notes on players ("threw", "AFK", "great duo"). Right-click anyone in the Live tab to flag them, or open **⚑ Flags** after a match to flag players from your last 3 lobbies. Flagged players show up in orange with your note when you meet them again. Only players whose names were visible can be flagged, and a flag never shows on someone who's hidden. Notes are stored only on your PC.
 - **My profile**: current rank/RR/peak, your **session** (W/L, RR, streak and KD for games less than 3 hours apart), a **rank-progress graph** of your last 20 competitive games (hover a point for details), and your last 20 matches with map, agent, result, score, K/D/A, KD, HS%, ACS and RR change. Double-click a match to see its **scoreboard**. Names show only for players VLite saw with visible names in that match.
 - **Stats**: your competitive win %, KD, ACS and HS% per map and per agent, from every match saved on this PC. "Load 20 older matches" pulls in more history.
+- **Team comp check** (agent select + in game): your team's roles, e.g. `2 Duelist · 1 Initiator · 1 Controller`, with warnings like "⚠ no controller" or "3 duelists". Hovered picks count, so you can plan before locking.
+- **Map form**: your record on the current map (`You on Ascent: 64% WR · 1.21 KD (11 games)`), in the Live tab and overlay title.
+- **Post-match recap**: after each game, a small card with your K/D/A, ACS, HS% and KD compared to your usual, your ACS rank on your team, and RR change.
+- **Friends**: who's in a match (map, mode, score), in agent select, in menus (party size), away or playing another Riot game, with their rank. It's read from the Riot Client on your PC, like the in-game friends list.
+- **Crosshairs**: save crosshair codes with names and copy one with a click. Paste it in VALORANT under Settings → Crosshair → Import Profile Code. VLite never changes game settings itself.
 - **Store**: your daily offers and Night Market with prices, discounts and reset timers, plus your VP, Radianite and Kingdom Credits. It's only loaded when you click "Load my store".
 
 "Played before" checks every match VLite has saved. On first launch that's your last 20 games, and it grows each time you play.
@@ -47,6 +52,12 @@ If you'd rather skip building, double-click `VLite.bat` to run it straight from 
 - Windows notifications for **Match found** and **Flagged player in your lobby**. Windows' gaming Focus Assist can hold notifications while a game is fullscreen. The overlay alert still works.
 - **Start VLite with Windows** is in Settings. It adds a normal per-user startup entry and doesn't need admin rights.
 - All of these can be switched off in Settings.
+
+## Updates
+VLite checks GitHub for a newer release when it starts. If one exists, a bar at the top offers **Update now**: it downloads the new `VLite.exe`, swaps it in and restarts. You can turn this off or check manually in **Settings → Help**.
+
+## Something not working?
+Open **Settings → Help → Copy diagnostics** and paste the result into your bug report or message. It contains the VLite version, Windows version, your settings and the recent log, with player and match IDs removed. The full log is in `%LOCALAPPDATA%\VLite\vlite.log`.
 
 ## Ban safety
 - No memory reading, injection, or graphics hooking. The overlay isn't drawn inside the game. It's a normal, transparent, always-on-top window, like a Discord or OBS window. The hotkey uses Windows' standard `RegisterHotKey` instead of a keyboard hook.
