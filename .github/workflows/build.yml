@@ -27,15 +27,17 @@ jobs:
       - name: Build VLite.exe
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pyinstaller==6.11.1
+          python -m pip install pyinstaller==6.11.1 certifi
           python -m PyInstaller --onefile --noconsole --name VLite --icon assets/VLite.ico --add-data "assets/VLite.ico;assets" vlite.py
 
       - name: Self-test the built exe
         timeout-minutes: 3
         run: |
           $p = Start-Process dist\VLite.exe -ArgumentList "--selftest" -PassThru -Wait
-          Get-Content "$env:LOCALAPPDATA\VLite\selftest.txt"
+          $report = Get-Content "$env:LOCALAPPDATA\VLite\selftest.txt" -Raw
+          $report
           if ($p.ExitCode -ne 0) { exit 1 }
+          if ($report -notmatch "certifi bundled: True") { Write-Error "certifi is missing from the exe"; exit 1 }
 
       - uses: actions/upload-artifact@v4
         with:

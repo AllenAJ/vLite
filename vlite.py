@@ -97,7 +97,7 @@ if WINDOWS:
     shell32.ExtractIconW.restype = wintypes.HICON
     shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 GITHUB_REPO = "AllenAJ/vLite"  # releases here are where update checks look
 APPDATA = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
 # The app icon: next to this file when run from source, unpacked to sys._MEIPASS inside the built exe.
@@ -150,7 +150,17 @@ _local_ctx.check_hostname = False
 _local_ctx.verify_mode = ssl.CERT_NONE
 _LOCAL = urllib.request.build_opener(urllib.request.ProxyHandler({}),
                                      urllib.request.HTTPSHandler(context=_local_ctx))
-_WEB = urllib.request.build_opener()
+# Internet requests check certificates against Windows' store *plus* certifi's list (bundled into the exe),
+# because Windows only installs some root certificates on demand and Python can't trigger that.
+_web_ctx = ssl.create_default_context()
+try:
+    import certifi
+    _web_ctx.load_verify_locations(certifi.where())
+except (ImportError, OSError):
+    pass
+_WEB = urllib.request.build_opener(urllib.request.HTTPSHandler(context=_web_ctx))
+# Riot's servers expect requests to identify like the game client does.
+RIOT_UA = "ShooterGame/13 Windows/10.0.19043.1.256.64bit"
 
 
 class NotFound(Exception):
@@ -168,6 +178,10 @@ def request(method, url, headers=None, body=None, local=False, timeout=10):
     except urllib.error.HTTPError as e:
         if e.code == 404:
             raise NotFound(url) from None
+        try:  # keep Riot's short error text (e.g. an error code) for the log / diagnostics
+            e.riot_body = e.read(300).decode("utf-8", "replace")
+        except Exception:
+            e.riot_body = ""
         raise
     return json.loads(raw) if raw else None
 
@@ -181,8 +195,13 @@ def read_log():
 
 
 def version_from_log():
-    m = re.search(r"CI server version: (\S+)", read_log())
-    return m.group(1) if m else ""
+    text = read_log()
+    m = re.search(r"CI server version: (release-\S+)", text)
+    if m:
+        return m.group(1)
+    branch, build, change = (re.search(p, text) for p in (r"Branch: (release-[\d.]+)", r"Build version: (\d+)",
+                                                          r"Changelist: (\d+)"))
+    return f"{branch.group(1)}-shipping-{build.group(1)}-{change.group(1)}" if branch and build and change else ""
 
 
 class Assets:
@@ -393,7 +412,9 @@ class Riot:
             _name, _pid, port, password, _proto = f.read().strip().split(":")
         self.local_base = f"https://127.0.0.1:{port}"
         self.local_auth = {"Authorization": "Basic " + base64.b64encode(f"riot:{password}".encode()).decode()}
-        self.version = version or version_from_log()
+        # The game version Riot expects: from the running client first, then valorant-api.com, then the log.
+        self.version = self._client_version() or version or version_from_log()
+        log.info("client version: %s", self.version or "(unknown)")
         self._refresh_tokens()
         self.region, shard = self._region()
         self.pd = f"https://pd.{shard}.a.pvp.net"
@@ -413,12 +434,22 @@ class Riot:
             "X-Riot-Entitlements-JWT": ent["token"],
             "X-Riot-ClientPlatform": CLIENT_PLATFORM,
             "X-Riot-ClientVersion": self.version,
+            "User-Agent": RIOT_UA,
         }
 
+    def _client_version(self):
+        try:
+            for sess in (self._local_get("/product-session/v1/external-sessions") or {}).values():
+                if sess.get("productId") == "valorant" and str(sess.get("version", "")).startswith("release-"):
+                    return sess["version"]
+        except Exception:
+            log.warning("couldn't read the game version from the Riot Client", exc_info=True)
+        return ""
+
     def _region(self):
-        m = re.search(r"https://glz-(.+?)-1\.(.+?)\.a\.pvp\.net", read_log())
-        if m:
-            return m.group(1), m.group(2)
+        found = re.findall(r"https://glz-(.+?)-1\.(.+?)\.a\.pvp\.net", read_log())
+        if found:  # the newest server address in the log is the one this session uses
+            return found[-1]
         for s in (self._local_get("/product-session/v1/external-sessions") or {}).values():
             for arg in s.get("launchConfiguration", {}).get("arguments", []):
                 if arg.startswith("-ares-deployment="):
@@ -1908,6 +1939,8 @@ class App:
             f"VLite {VERSION} ({'exe' if getattr(sys, 'frozen', False) else 'source'})",
             platform.platform(), f"Python {platform.python_version()}",
             f"Status: {self.status.cget('text')}", f"Region: {self.riot.region or '?'} · state: {self.kind}",
+            f"Game version sent: {getattr(self.riot, 'version', '') or '(unknown)'} · "
+            f"game data: {'online' if self.assets.version else 'not loaded'}",
             f"Settings: {json.dumps(self.settings)}", "--- log ---", *tail])
         self.root.clipboard_clear()
         self.root.clipboard_append(redact(text))
@@ -2064,7 +2097,7 @@ class App:
                     try:
                         self.me_name = self.riot.names([self.riot.puuid])[self.riot.puuid]
                     except urllib.error.HTTPError as e:
-                        log.warning("own name lookup failed: HTTP %s", e.code)
+                        log.warning("own name lookup failed: HTTP %s %s", e.code, getattr(e, "riot_body", ""))
                         self.me_name = "You"
                 if self.reload_profile:
                     self.reload_profile = False
@@ -2102,7 +2135,7 @@ class App:
                 self.post(self.set_status, f"● {self.me_name} · {self.riot.region.upper()} · "
                                            f"{STATE_LABEL[self.kind]}  |  {self.hotkey_note}")
             except urllib.error.HTTPError as e:
-                log.warning("HTTP %s from %s", e.code, e.url)
+                log.warning("HTTP %s from %s %s", e.code, e.url, getattr(e, "riot_body", ""))
                 if e.code == 429:
                     self.post(self.set_status, "Riot asked us to slow down — pausing 60s")
                     delay = 60
@@ -2332,7 +2365,16 @@ def self_test(app):
             app.root.update()
         except Exception as e:
             problems.append(f"{name}: {e!r}")
+    try:  # a real secure connection, like update checks and image downloads make
+        latest_release()
+        tls = "ok"
+    except urllib.error.HTTPError as e:
+        tls = f"ok (HTTP {e.code})"  # the connection itself worked
+    except Exception as e:
+        tls = f"FAILED: {e}"
+        problems.append(f"secure web connection: {e}")
     report = "SELFTEST OK" if not problems else "SELFTEST FAILED\n" + "\n".join(problems)
+    report += f"\nsecure connection: {tls} · certifi bundled: {'certifi' in sys.modules}"
     report += f"\nhotkey: {app.hotkey_note}\nicon found: {os.path.exists(ICON)}"
     print(report, flush=True)
     os.makedirs(CACHE_DIR, exist_ok=True)
