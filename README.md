@@ -22,6 +22,8 @@ A single ~2,400-line Python file, no dependencies. Shows what the Tracker.gg app
 - **Agent pick tips** (agent select): which role your team still needs, and your best agent for it on this map from your own history, e.g. `Tip: your team still needs a Controller · your best pick: Omen, 68% WR on this map (9 games)`.
 - **Free-for-all view** (Deathmatch): one list sorted by rank, with no ally/enemy split.
 - **Map form**: your record on the current map (`You on Ascent: 64% WR · 1.21 KD (11 games)`), in the Live tab and overlay title.
+- **Live round tracker** (in game): score, round number and each round's result, e.g. `7–5 · R13 · WWLWLW · sides switched`, plus match point and overtime. It reads the score the Riot Client already shares as your status. A live kill feed isn't available to outside tools without reading game memory, so your in-game Tab scoreboard is the place for that.
+- **Rounds breakdown** (after the match): each round's result, how it ended, your kills (by agent), damage, loadout, and first blood, first death, plant, defuse or ace. Open it from a match's scoreboard or the recap.
 - **Post-match recap**: after each game, a small card with your K/D/A, ACS, HS% and KD compared to your usual, your ACS rank on your team, and RR change.
 - **Friends**: who's in a match (map, mode, score), in agent select, in menus (party size), away or playing another Riot game, with their rank. It's read from the Riot Client on your PC, like the in-game friends list.
 - **Crosshairs**: save crosshair codes with names and copy one with a click. Paste it in VALORANT under Settings → Crosshair → Import Profile Code. VLite never changes game settings itself.

@@ -98,7 +98,7 @@ if WINDOWS:
     shell32.ExtractIconW.restype = wintypes.HICON
     shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 GITHUB_REPO = "AllenAJ/vLite"  # releases here are where update checks look
 APPDATA = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
 # The app icon: next to this file when run from source, unpacked to sys._MEIPASS inside the built exe.
@@ -432,6 +432,7 @@ class Riot:
         self.rr_history = []  # your recent competitive RR updates, newest first
         self._enc = None
         self._match = None  # (match id, data) of the current in-game match
+        self.presence = {}
 
     def connect(self, version):
         with open(LOCKFILE) as f:
@@ -500,12 +501,18 @@ class Riot:
             return request(method, url, self.headers, body)
 
     def _loop_state(self):
-        """MENUS / PREGAME / INGAME from local presence, so menus cost no web requests."""
+        """MENUS / PREGAME / INGAME from your presence on this PC, so menus cost no web requests.
+        Also keeps the rest of your presence (e.g. the live round score) in self.presence."""
+        self.presence = {}
         try:
             for p in self._local_get("/chat/v4/presences")["presences"]:
                 if p.get("puuid") == self.puuid and p.get("product") == "valorant" and p.get("private"):
                     priv = json.loads(base64.b64decode(p["private"]))
-                    return (priv.get("matchPresenceData") or priv).get("sessionLoopState")
+                    flat = dict(priv)  # older presences are flat; newer ones nest these sections
+                    for section in ("matchPresenceData", "partyPresenceData", "playerPresenceData"):
+                        flat.update(priv.get(section) or {})
+                    self.presence = flat
+                    return flat.get("sessionLoopState")
         except Exception:
             pass
         return None
@@ -603,6 +610,35 @@ class Riot:
             out += page
             if len(page) < 20 or page[-1].get("MatchStartTime", 0) < since_ms:
                 break
+        return out
+
+    def rounds(self, mid):
+        """Round-by-round view of a finished match from your side (cached on disk)."""
+        path = os.path.join(CACHE_DIR, "rounds", f"{mid}.json")
+        cached = load_json(path, None)
+        if cached is not None:
+            return cached
+        d = self.api("GET", f"{self.pd}/match-details/v1/matches/{mid}")
+        me = self.puuid
+        team_of = {p["subject"]: p.get("teamId") for p in d.get("players") or []}
+        agent_of = {p["subject"]: p.get("characterId") for p in d.get("players") or []}
+        out = []
+        for r in d.get("roundResults") or []:
+            stats = r.get("playerStats") or []
+            kills = sorted((k for ps in stats for k in ps.get("kills") or []),
+                           key=lambda k: k.get("roundTime", k.get("timeSinceRoundStartMillis", 0)))
+            mine = next((ps for ps in stats if ps.get("subject") == me), {})
+            first = kills[0] if kills else {}
+            out.append({
+                "n": r.get("roundNum", len(out)) + 1, "won": r.get("winningTeam") == team_of.get(me),
+                "how": r.get("roundResult") or "",
+                "kills": [agent_of.get(k.get("victim")) for k in mine.get("kills") or []],  # agents, never names
+                "damage": sum(x.get("damage", 0) for x in mine.get("damage") or []),
+                "loadout": (mine.get("economy") or {}).get("loadoutValue"),
+                "fb": first.get("killer") == me, "fd": first.get("victim") == me,
+                "planted": r.get("bombPlanter") == me, "defused": r.get("bombDefuser") == me,
+            })
+        save_json(path, out)
         return out
 
     def my_matches(self, queue_id="competitive"):
@@ -1120,6 +1156,8 @@ class App:
         self.friends_visible, self.friends_at = False, 0
         self.recap_tries, self.last_top = 0, None  # post-match recap: retries left, newest match seen
         self._map_form = (None, None)
+        self._rounds = (None, [], None)  # (match id, "W"/"L"/"?" per round, last score seen)
+        self.round_text = ""
         self.want_weekly = False  # "manual" from the button, "auto" once per week
         self.tray = Tray(lambda: self.post(self.open_window), lambda: self.post(self.toggle_overlay),
                          lambda: self.post(self.quit))
@@ -1510,6 +1548,9 @@ class App:
             row["gap_before"] = bool(i and not ffa and table[i - 1]["ally"] and not row["ally"])
         self.live_table.render(table)
         session = f" · {self.session_short}" if self.settings["ov_session"] and self.session_short else ""
+        if kind == "ingame" and self.round_text:  # in a match the live score matters more than the session
+            session = f" · {self.round_text}"
+            self.live_head.config(text=("   " if banner else "") + f"{head} · {self.round_text}")
         tip = self.pick_tip(table, match.get("MapID")) if kind == "pregame" and not ffa else ""
         comp = "" if tip else self.comp_line(table)  # the tip already says which role is missing
         self.live_sub.config(text="     ".join(x for x in (comp, self.map_form(match.get("MapID")), tip) if x))
@@ -1782,7 +1823,7 @@ class App:
         tk.Label(top, text=lines[0][0], fg=lines[0][1], bg=BG, font=("Segoe UI Semibold", 13)).pack(side="left")
         for text, color in lines[1:]:
             tk.Label(d, text=text, fg=color, bg=BG, font=("Segoe UI", 10), anchor="w").pack(anchor="w", pady=2)
-        ttk.Button(d, text="Scoreboard", command=lambda: self.open_scoreboard(mid)).pack(anchor="e", pady=(10, 0))
+        ttk.Button(d, text="Scoreboard & rounds", command=lambda: self.open_scoreboard(mid)).pack(anchor="e", pady=(10, 0))
 
     def show_session(self, hist):
         """Session = your recent games with less than 3 hours between them."""
@@ -2135,8 +2176,43 @@ class App:
                             self.images, BG, icon_px=26, size=10, row_bg=lambda row: ALLY_BG if row["ally"] else ENEMY_BG)
         table.pack(padx=10, pady=(0, 6))
         table.render(rows)
-        ttk.Label(d, text="Names show only for players VLite saw with visible names in this match.",
-                  style="Muted.TLabel").pack(anchor="w", padx=12, pady=(0, 10))
+        ttk.Label(d, text="Names only for players VLite saw with visible names in this match",
+                  style="Muted.TLabel").pack(anchor="w", padx=12, pady=(0, 6))
+        rounds_head = ttk.Label(d, text="Loading rounds…", style="Head.TLabel")
+        rounds_head.pack(anchor="w", padx=12, pady=(6, 4))
+        tree = make_tree(d, [("Result", 60), ("How", 130), ("Your kills", 230), ("Damage", 70), ("Loadout", 70),
+                             ("Notes", 160)], icon_col=("Round", 70))
+        tree.tag_configure("Win", foreground=WIN)
+        tree.tag_configure("Loss", foreground=LOSS)
+
+        def fill(rounds):
+            if not d.winfo_exists():
+                return
+            if isinstance(rounds, str):
+                rounds_head.config(text=rounds)
+                return
+            fbs, fds = sum(r["fb"] for r in rounds), sum(r["fd"] for r in rounds)
+            multi = Counter(len(r["kills"]) for r in rounds if len(r["kills"]) >= 3)
+            extra = "".join(f" · {n}× {k}K" for k, n in sorted(multi.items(), reverse=True))
+            rounds_head.config(text=f"Rounds · first bloods {fbs} · first deaths {fds}{extra}")
+            tree.configure(height=min(len(rounds), 14))
+            for r in rounds:
+                notes = [t for t, on in (("first blood", r["fb"]), ("died first", r["fd"]), ("planted", r["planted"]),
+                                         ("defused", r["defused"]), ("ACE", len(r["kills"]) >= 5)) if on]
+                victims = ", ".join(a.agent(v) for v in r["kills"])
+                tree.insert("", "end", text=f' {r["n"]}', tags=("Win" if r["won"] else "Loss",), values=(
+                    "Win" if r["won"] else "Loss", r["how"], f'{len(r["kills"])}' + (f"  ({victims})" if victims else ""),
+                    r["damage"], f'{r["loadout"]:,}' if r["loadout"] else "", ", ".join(notes)))
+
+        def load():
+            try:
+                rounds = self.riot.rounds(mid)
+            except Exception as e:
+                log.warning("round details unavailable: %s", e)
+                rounds = "Round details aren't available for this match."
+            self.post(fill, rounds)
+
+        threading.Thread(target=load, daemon=True).start()
 
     def load_store(self):
         self.want_store = True
@@ -2304,6 +2380,7 @@ class App:
         if self.kind == "menus":
             self.post(self.tabs.select, 0)
         self.kind = kind
+        self.track_rounds(kind, match)
         rows = self.riot.players(kind, match)
         visible = [p["puuid"] for p in rows if not p["hidden"]]
         try:
@@ -2322,6 +2399,24 @@ class App:
         parties = self.riot.parties(visible, match.get("ID"))
         self.post(self.show_live, kind, match, rows, names, ranks, forms, self.riot.encounters(), parties)
 
+    def track_rounds(self, kind, match):
+        """Live score from your presence; each change of +1 round is a win or a loss."""
+        pr = self.riot.presence
+        ally, enemy = pr.get("partyOwnerMatchScoreAllyTeam"), pr.get("partyOwnerMatchScoreEnemyTeam")
+        queue_id = (match.get("MatchmakingData") or {}).get("QueueID") or pr.get("queueId") or ""
+        if kind != "ingame" or ally is None or enemy is None or queue_id in ("deathmatch", "hurm", "ggteam"):
+            self.round_text = ""
+            return
+        mid, results, last = self._rounds
+        if mid != match.get("ID") or last is None or ally + enemy < sum(last):
+            results = ["?"] * (ally + enemy)  # opened mid-match: earlier rounds' order is unknown
+        elif (ally, enemy) != last:
+            won, lost = ally - last[0], enemy - last[1]
+            # several rounds since the last check: still exact if they all went the same way
+            results += ["W"] * won + ["L"] * lost if not (won and lost) else ["?"] * (won + lost)
+        self._rounds = (match.get("ID"), results, (ally, enemy))
+        self.round_text = round_line(ally, enemy, results, queue_id)
+
     def _fetch_form(self, puuid):
         try:
             self.riot.form(puuid)
@@ -2334,6 +2429,28 @@ class App:
 
 VP_ID, RAD_ID, KC_ID = ("85ad13f7-3d1b-5128-9eb2-7cd8ee0b5741", "e59aa87c-4cbf-517a-5983-6e81511be9b7",
                         "85ca954a-41f2-ce94-9b45-8ca3dd39a00d")
+
+
+ROUND_RULES = {"swiftplay": (4, 5), "spikerush": (3, 4)}  # queue: (rounds per half, rounds to win); default 12, 13
+
+
+def round_line(ally, enemy, results, queue_id):
+    """'7–5 · R13 · WWLWLW · sides switched' from the live score and the results seen so far."""
+    half, win_at = ROUND_RULES.get(queue_id, (12, 13))
+    played = ally + enemy
+    text = f"{ally}–{enemy} · R{played + 1}"
+    seen = "".join(results[-6:]).lstrip("?")
+    if seen:
+        text += f" · {seen}"
+    if queue_id not in ROUND_RULES and ally >= half and enemy >= half:
+        text += " · overtime"
+    elif max(ally, enemy) == win_at - 1:
+        text += " · match point"
+    elif played == half:
+        text += " · sides switched"
+    elif played == half - 1:
+        text += " · last round of the half"
+    return text
 
 
 def parse_version(text):
@@ -2456,6 +2573,7 @@ def self_test(app):
         ("friends view", lambda: app.show_friends([{"puuid": "x", "game_name": "Test", "game_tag": "0"}], {})),
         ("comp check", lambda: app.comp_line([])),
         ("pick tip", lambda: app.pick_tip([], None)),
+        ("round tracker", lambda: round_line(7, 5, ["W", "L"], "competitive")),
         ("weekly report", lambda: app.show_weekly([], False)),
         ("compact overlay", lambda: (app.set_option("ov_compact", True), app.set_option("ov_compact", False))),
         ("diagnostics", app.copy_diagnostics),
