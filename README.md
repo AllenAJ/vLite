@@ -1,9 +1,33 @@
-<img src="assets/icon.png" width="64" align="left">
+<p align="center"><img src="assets/icon.png" width="96" alt="VLite icon"></p>
+<h1 align="center">VLite</h1>
+<p align="center"><b>A lightweight VALORANT tracker for Windows</b><br>
+Lobby ranks &amp; form · in-game overlay · live round tracker · round-by-round breakdowns</p>
+<p align="center">
+  <a href="https://github.com/AllenAJ/vLite/releases/latest"><img alt="Download" src="https://img.shields.io/github/v/release/AllenAJ/vLite?label=download&color=5ec8f2"></a>
+  <img alt="Downloads" src="https://img.shields.io/github/downloads/AllenAJ/vLite/total?color=243040">
+  <img alt="Windows" src="https://img.shields.io/badge/platform-Windows-0f1419">
+</p>
+<p align="center"><img src="assets/demo.gif" width="480" alt="VLite in action (demo data)"><br><sub>Demo data shown</sub></p>
 
-# VLite — lightweight Valorant tracker (Windows)
+**Free · open source · no Overwolf · one small .exe.** VLite only reads data: it never touches game memory or injects anything, and players who hide their names stay hidden.
 
-A single ~2,400-line Python file, no dependencies. Shows what the Tracker.gg app shows at its core:
+## Download
+1. Open **[Releases](https://github.com/AllenAJ/vLite/releases/latest)** and download **VLite.exe**.
+2. Put it anywhere (Desktop, `C:\Games\VLite`, …) and double-click it. There's nothing to install, and Python isn't needed.
+3. Windows SmartScreen may warn the first time because the exe isn't code-signed. Click **More info → Run anyway**.
 
+Every exe is built and self-tested on a clean Windows machine by GitHub Actions (`.github/workflows/build.yml`) from the code in this repo.
+
+## Screenshots
+| Lobby | In-game overlay (F6) |
+|---|---|
+| <img src="assets/screenshots/live.png" alt="Live lobby view"> | <img src="assets/screenshots/overlay.png" alt="In-game overlay"> |
+| **Round-by-round breakdown** | **Your climb** |
+| <img src="assets/screenshots/rounds.png" alt="Rounds breakdown"> | <img src="assets/screenshots/me.png" alt="Me tab with rank graph"> |
+
+<sub>Screenshots use demo data.</sub>
+
+## Features
 - **Live** (agent select + in game). By default it shows each player's agent, name, rank, KD, last 5 games and your history with them. Tick **More stats** for every column below. For every teammate and opponent:
   - agent, name, level, rank + RR, peak rank, act win rate
   - recent form from their last 5 competitive games: KD, ACS, HS%, W/L. This fills in a few seconds after the lobby loads.
@@ -30,13 +54,6 @@ A single ~2,400-line Python file, no dependencies. Shows what the Tracker.gg app
 - **Store**: your daily offers and Night Market with prices, discounts and reset timers, plus your VP, Radianite and Kingdom Credits. It's only loaded when you click "Load my store".
 
 "Played before" checks every match VLite has saved. On first launch that's your last 20 games, and it grows each time you play.
-
-## Download (easiest)
-1. Open **[Releases](https://github.com/AllenAJ/vLite/releases/latest)** and download **VLite.exe**.
-2. Put it anywhere (Desktop, `C:\Games\VLite`, …) and double-click it. There's nothing to install, and Python isn't needed.
-3. Windows SmartScreen may warn the first time because the exe isn't code-signed. Click **More info → Run anyway**.
-
-Every exe is built and self-tested on a clean Windows machine by GitHub Actions (`.github/workflows/build.yml`) from the code in this repo.
 
 ## Build it yourself (optional)
 1. Install Python 3.9+ from python.org (tick **Add python.exe to PATH**).
@@ -74,3 +91,28 @@ Open **☰ → Copy diagnostics** and paste the result into your bug report or m
 - One cheap local check every 5s while you're in menus. Ranks are cached for 10 min, and finished matches are cached on disk at `%LOCALAPPDATA%\VLite`.
 
 These endpoints are unofficial, so Riot can change them at any time. Tools built this way aren't known to cause bans, but Riot doesn't guarantee that.
+
+## FAQ
+**Can I get banned for using it?**
+VLite doesn't do anything anti-cheat looks for: no memory reading, no injection, no input automation. It only reads the same data the Riot Client fetches with your own login, and the overlay is an ordinary window. The Riot endpoints it uses are unofficial, so nobody can guarantee anything, but tools built this way aren't known to cause bans.
+
+**Why not Overwolf?**
+To stay small: one .exe, nothing else running in the background. The trade-off is that live kills per round aren't available (Riot only shares those with Overwolf apps). VLite shows the live score and round results during the match, and the full round-by-round breakdown right after.
+
+**Windows says "Windows protected your PC".**
+The exe isn't code-signed (signing certificates cost money), so SmartScreen warns about new downloads. Click **More info → Run anyway**. Every release is built from this repo's code by GitHub Actions (`.github/workflows/build.yml`), and you can scan the exe on [VirusTotal](https://www.virustotal.com) yourself.
+
+**Does it show hidden / incognito players?**
+No. Players who hide their name show as "Hidden": VLite never looks up their rank or history, and never shows a name they've hidden.
+
+**Where does my data go?**
+To Riot (through your own Riot Client), GitHub (update check) and valorant-api.com (agent, map and rank images). Your flags, crosshairs and match cache stay on your PC in `%LOCALAPPDATA%\VLite`.
+
+**The overlay doesn't show in game.**
+Set VALORANT's Display Mode to **Windowed Fullscreen**. Fullscreen mode doesn't allow any window on top of the game.
+
+**Mac or Linux?**
+Windows only, because VALORANT is.
+
+## Disclaimer
+VLite isn't endorsed by Riot Games and doesn't reflect the views or opinions of Riot Games or anyone officially involved in producing or managing Riot Games properties. Riot Games and all associated properties are trademarks or registered trademarks of Riot Games, Inc.
